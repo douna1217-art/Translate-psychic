@@ -1,0 +1,1673 @@
+import { useEffect, useMemo, useState } from "react";
+import { supabase } from "./utils/supabaseClient";
+
+const defaultSettings = {
+  showTranslation: true,
+  showPronunciation: true,
+  showExample: true,
+  showTip: true,
+};
+
+const settingLabels = {
+  showTranslation: "显示翻译",
+  showPronunciation: "显示音标",
+  showExample: "显示例句",
+  showTip: "显示学习提示",
+};
+
+function normalizeSearchTerm(term) {
+  return term.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function speakWord(word) {
+  if (!word || typeof window === "undefined" || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(word);
+  utterance.lang = "en-US";
+  window.speechSynthesis.speak(utterance);
+}
+
+function extractJson(text) {
+  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  return JSON.parse(cleaned);
+}
+
+// 所有 AI 调用统一走后端的 /api/gemini 代理（见项目根目录 api/gemini.js）。
+// 真正的 Gemini API Key 只存在服务器端环境变量里，浏览器拿不到，避免被偷走。
+async function callAI(prompt) {
+  const response = await fetch("/api/gemini", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) {
+    const errMsg = data.error || "AI 服务暂时不可用，请稍后再试";
+    throw new Error(typeof errMsg === "string" ? errMsg : JSON.stringify(errMsg));
+  }
+  return text;
+}
+
+// 把例句中出现的目标单词/词组高亮显示。英文按词边界+简单变形匹配，中文按原样子串匹配（中文没有单词边界）
+function highlightWord(sentence, word) {
+  if (!sentence || !word) return sentence;
+  const isCJK = /[\u4e00-\u9fff]/.test(word);
+
+  if (isCJK) {
+    const parts = sentence.split(word);
+    const nodes = [];
+    parts.forEach((part, i) => {
+      nodes.push(<span key={`t-${i}`}>{part}</span>);
+      if (i < parts.length - 1) {
+        nodes.push(
+          <mark key={`m-${i}`} className="bg-emerald-200 text-emerald-900 rounded px-0.5">
+            {word}
+          </mark>
+        );
+      }
+    });
+    return nodes;
+  }
+
+  const escaped = word.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!escaped) return sentence;
+  const splitRegex = new RegExp(`(\\b${escaped}\\w*)`, "gi");
+  const matchTest = new RegExp(`^${escaped}\\w*$`, "i");
+  return sentence.split(splitRegex).map((seg, i) =>
+    matchTest.test(seg) ? (
+      <mark key={i} className="bg-emerald-200 text-emerald-900 rounded px-0.5">{seg}</mark>
+    ) : (
+      <span key={i}>{seg}</span>
+    )
+  );
+}
+
+const wordCardCache = new Map();
+
+// ① 免费英语词典 API：能访问时用它拿权威、完整的英文释义/例句/音标，几乎没有等待时间
+// status: "ok"（查到了）| "notfound"（词典里没有这个词，可能是拼写错误）| "blocked"（请求失败/被拦截，比如当前沙盒环境访问不了外部地址）
+async function fetchFreeDictionary(word) {
+  try {
+    const res = await fetch(
+      `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word.trim().toLowerCase())}`
+    );
+    if (res.status === 404) return { status: "notfound" };
+    if (!res.ok) return { status: "blocked" };
+    const data = await res.json();
+    const entry = Array.isArray(data) ? data[0] : null;
+    return entry ? { status: "ok", entry } : { status: "notfound" };
+  } catch (error) {
+    return { status: "blocked" };
+  }
+}
+
+// ② Datamuse 拼写建议 API：能访问时用它给"您是否要搜索"，比让 AI 猜更快更准
+async function fetchSpellingSuggestions(word) {
+  try {
+    const res = await fetch(`https://api.datamuse.com/words?sp=${encodeURIComponent(word)}&max=5`);
+    if (!res.ok) return { status: "blocked" };
+    const data = await res.json();
+    return { status: "ok", list: data.map((item) => item.word).filter((w) => w.toLowerCase() !== word.toLowerCase()) };
+  } catch (error) {
+    return { status: "blocked" };
+  }
+}
+
+// 从词典条目里整理出常见释义（每个词性最多取2条，最多8条，保证完整又不过量）
+function extractMeaningsFromDict(dictEntry) {
+  const meanings = dictEntry.meanings || [];
+  const collected = [];
+  for (const m of meanings.slice(0, 4)) {
+    const defs = (m.definitions || []).slice(0, 2);
+    for (const d of defs) {
+      collected.push({
+        part_of_speech: m.partOfSpeech,
+        english_definition: d.definition,
+        example: d.example || "",
+      });
+    }
+  }
+  return collected.slice(0, 8);
+}
+
+// AI 只负责"翻译"这一件事——比从零生成快得多，而且是基于真实词典内容翻译，不会瞎编
+async function translateMeaningsWithAI(word, meanings) {
+  if (meanings.length === 0) return { translation: "", items: [] };
+
+  const listText = meanings
+    .map((m, i) => `${i + 1}. [${m.part_of_speech}] ${m.english_definition}${m.example ? ` | 例句: ${m.example}` : ""}`)
+    .join("\n");
+
+  const prompt = `请把下面来自英语词典的释义翻译成自然、简洁的中文，供中国学生学英语使用。单词："${word}"。
+${listText}
+
+只输出 JSON，不要多余文字或 markdown：
+{
+  "translation": "整个单词最常用的中文翻译（一两个词）",
+  "items": [
+    { "chinese_meaning": "简短中文词义", "definition_translation": "该条释义的中文翻译", "example_translation": "对应例句的中文翻译（没有例句则留空）", "learning_tip": "结合词根/搭配的记忆小贴士，20字以内" }
+  ]
+}
+items 数组长度必须与上面编号数量一致，按顺序对应，不要合并或省略。`;
+
+  const text = await callAI(prompt, 1000);
+  return extractJson(text);
+}
+
+// zh->en 场景：先用一个很小的 AI 调用把中文映射成最常用的英文单词，再复用同一套词典+翻译流程
+async function mapChineseToEnglish(chineseWord) {
+  try {
+    const text = await callAI(
+      `给出中文"${chineseWord}"最常用对应的英文单词。只输出 JSON：{"word":"xxx"}，不要多余文字。`,
+      200
+    );
+    const parsed = extractJson(text);
+    return parsed.word || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function buildCardFromDict(englishWord, dictEntry, meanings, translationResult) {
+  const phonetic =
+    dictEntry.phonetic || (dictEntry.phonetics || []).map((p) => p.text).find(Boolean) || "";
+  const items = translationResult.items || [];
+  const senses = meanings.map((m, i) => ({
+    part_of_speech: m.part_of_speech,
+    english_definition: m.english_definition,
+    example: m.example,
+    chinese_meaning: items[i]?.chinese_meaning || "",
+    definition_translation: items[i]?.definition_translation || "",
+    example_translation: items[i]?.example_translation || "",
+    learning_tip: items[i]?.learning_tip || "",
+  }));
+  return {
+    id: Date.now(),
+    word: englishWord,
+    translation: translationResult.translation || senses[0]?.chinese_meaning || "",
+    pronunciation: phonetic,
+    senses,
+    notes: "",
+    createdAt: Date.now(),
+  };
+}
+
+// 降级方案：词典/拼写建议 API 访问不通时（比如当前沙盒环境），完全交给 AI 一次性生成
+// 要求覆盖"常见"的释义，不人为设上限为1-2条，保证完整度；同时明确要求不要为乱打的字符硬编释义
+async function generateCardWithAIOnly(word, direction) {
+  const prompt = `你是英语词典编纂专家。用户输入了："${word}"（查询方向：${direction === "en->zh" ? "英文查中文" : "中文查英文"}）。
+
+第一步先判断：这是不是一个真实存在、可识别的英文单词或常见短语？
+- 如果是随机敲的字符、明显的乱码、或者根本不是任何语言里的真实词汇/短语，不要编造释义。此时只输出：{"not_found": true}
+- 如果只是可能拼错了但看起来接近某个真实单词，同样输出 {"not_found": true}，不要猜测着硬给一个不相关的释义。
+
+只有当它确实是一个真实、可识别的词/短语时，才给出常见的全部释义，覆盖日常和常见语境下会用到的词性和意思（通常2-5条，不要遗漏常见用法，但不要堆砌生僻义项）。
+
+只输出 JSON，不要多余文字或 markdown：
+{
+  "word": "${direction === "zh->en" ? "对应的英文单词" : "原单词"}",
+  "translation": "最常用的中文翻译（一两个词）",
+  "pronunciation": "音标",
+  "senses": [
+    { "part_of_speech": "词性", "english_definition": "简短英文释义", "chinese_meaning": "简短中文词义", "definition_translation": "释义的中文翻译", "example": "英文例句", "example_translation": "例句中文翻译", "learning_tip": "简短学习提示，20字以内" }
+  ]
+}`;
+
+  const text = await callAI(prompt, 1200);
+  const parsed = extractJson(text);
+
+  if (parsed.not_found || !parsed.senses || parsed.senses.length === 0) {
+    return null;
+  }
+
+  return {
+    id: Date.now(),
+    word: parsed.word || word,
+    translation: parsed.translation || "",
+    pronunciation: parsed.pronunciation || "",
+    senses: parsed.senses || [],
+    notes: "",
+    createdAt: Date.now(),
+  };
+}
+
+// 降级方案：拼写建议 API 访问不通时，让 AI 直接给出可能的正确拼写
+async function getAISpellingSuggestions(word) {
+  try {
+    const text = await callAI(
+      `"${word}" 看起来可能是拼写错误的英文单词。给出最多3个最可能的正确拼写。只输出 JSON：{"suggestions":["xxx","yyy"]}，如果它本身就是正确的常见词，返回空数组。`,
+      200
+    );
+    const parsed = extractJson(text);
+    return parsed.suggestions || [];
+  } catch (error) {
+    return [];
+  }
+}
+
+// 学中文模式：面向英语母语学习者。目前没有接入免费的中文词典API，所以直接由AI生成，
+// 但明确要求内容面向英语学习者（英文释义、英文学习提示），中文只作为目标语言出现在词/例句中
+async function generateChineseCardWithAI(rawInput) {
+  const prompt = `You are a Mandarin Chinese teacher for English-speaking learners. The learner typed: "${rawInput}" (this could be English, Pinyin, or Chinese characters).
+
+First, judge: does this clearly correspond to a real, commonly used Chinese word or phrase?
+- If the input is random characters, gibberish, or doesn't correspond to any real Chinese word/phrase, do NOT invent one. Instead output: {"not_found": true, "suggestions": ["up to 3 likely intended English words or Pinyin, if any come to mind"]}
+- If it looks like a likely typo of something real, prefer returning not_found with suggestions rather than guessing an unrelated word.
+
+Only if it clearly is a real, recognizable word/phrase, identify the most common Chinese word or phrase this refers to and explain it for an English-speaking learner.
+
+Output ONLY JSON, no extra text or markdown:
+{
+  "word": "the Chinese word/phrase in Hanzi",
+  "pinyin": "pinyin with tone marks",
+  "gloss": "short 1-3 word English meaning",
+  "senses": [
+    {
+      "part_of_speech": "noun / verb / adjective / etc. (in English)",
+      "definition": "a concise English definition of this sense",
+      "example": "a Chinese example sentence using the word",
+      "example_gloss": "English translation of that example sentence",
+      "learning_tip": "a short English memory tip, e.g. character/radical breakdown, under 25 words"
+    }
+  ]
+}
+Provide 1-3 of the most common senses only.`;
+
+  const text = await callAI(prompt, 1000);
+  const parsed = extractJson(text);
+
+  if (parsed.not_found || !parsed.senses || parsed.senses.length === 0) {
+    return { notFound: true, suggestions: parsed.suggestions || [] };
+  }
+
+  return {
+    id: Date.now(),
+    word: parsed.word || rawInput,
+    pronunciation: parsed.pinyin || "",
+    translation: parsed.gloss || "",
+    senses: (parsed.senses || []).map((s) => ({
+      part_of_speech: s.part_of_speech || "",
+      example: s.example || "",
+      example_translation: s.example_gloss || "",
+      learning_tip: s.learning_tip || "",
+      definition_translation: s.definition || "",
+    })),
+    notes: "",
+    createdAt: Date.now(),
+  };
+}
+
+// 学中文模式的主查词入口：目前没有可靠的免费拼写建议来源，失败时直接返回notfound（不带建议）
+// 用 Datamuse 的词频数据判断一个词是否"够常见"。即使词典里技术上查得到（比如 foo 是编程黑话），
+// 如果频率很低，也顺手给出更常见的相近词作为"你是不是想找"的提示，而不是直接当作用户确定要查的词
+async function checkWordFrequencyAndAlternatives(word) {
+  try {
+    const res = await fetch(`https://api.datamuse.com/words?sp=${encodeURIComponent(word)}&md=f&max=6`);
+    if (!res.ok) return { lowConfidence: false, alternatives: [] };
+    const data = await res.json();
+    const exact = data.find((item) => item.word.toLowerCase() === word.toLowerCase());
+    const freqTag = exact?.tags?.find((t) => t.startsWith("f:"));
+    const freq = freqTag ? parseFloat(freqTag.slice(2)) : 0;
+
+    // 频率低于阈值，且单词较短（更容易是缩写/打错），才提示替代词，避免打扰正常查词
+    const isLowConfidence = word.length <= 5 && freq < 1;
+    if (!isLowConfidence) return { lowConfidence: false, alternatives: [] };
+
+    const alternatives = data
+      .filter((item) => item.word.toLowerCase() !== word.toLowerCase())
+      .slice(0, 4)
+      .map((item) => item.word);
+
+    return { lowConfidence: alternatives.length > 0, alternatives };
+  } catch (error) {
+    return { lowConfidence: false, alternatives: [] };
+  }
+}
+
+async function lookupChineseWord(rawWord) {
+  const cacheKey = `learn-zh:${normalizeSearchTerm(rawWord)}`;
+  if (wordCardCache.has(cacheKey)) {
+    return { type: "card", card: wordCardCache.get(cacheKey) };
+  }
+  try {
+    const result = await generateChineseCardWithAI(rawWord);
+    if (result.notFound || !result.word || !result.senses || result.senses.length === 0) {
+      return { type: "notfound", word: rawWord, suggestions: result.suggestions || [] };
+    }
+    wordCardCache.set(cacheKey, result);
+    return { type: "card", card: result };
+  } catch (error) {
+    console.error("查词失败:", error);
+    return { type: "notfound", word: rawWord, suggestions: [] };
+  }
+}
+async function lookupWord(rawWord, direction) {
+  const cacheKey = `${direction}:${normalizeSearchTerm(rawWord)}`;
+  if (wordCardCache.has(cacheKey)) {
+    return { type: "card", card: wordCardCache.get(cacheKey) };
+  }
+
+  let englishWord = rawWord.trim();
+
+  try {
+    if (direction === "zh->en") {
+      const mapped = await mapChineseToEnglish(rawWord);
+      if (mapped) englishWord = mapped;
+    }
+
+    const dictResult = await fetchFreeDictionary(englishWord);
+
+    if (dictResult.status === "ok") {
+      const meanings = extractMeaningsFromDict(dictResult.entry);
+      const translationResult = await translateMeaningsWithAI(englishWord, meanings);
+      const card = buildCardFromDict(englishWord, dictResult.entry, meanings, translationResult);
+      wordCardCache.set(cacheKey, card);
+
+      // 即使词典里查到了，也顺手看看是不是一个生僻/低频词，是的话带上"你是不是想找"的软提示
+      const freqCheck = await checkWordFrequencyAndAlternatives(englishWord);
+      return { type: "card", card, maybeSuggestions: freqCheck.lowConfidence ? freqCheck.alternatives : [] };
+    }
+
+    if (dictResult.status === "notfound") {
+      const spelling = await fetchSpellingSuggestions(englishWord);
+      const suggestions = spelling.status === "ok" ? spelling.list : await getAISpellingSuggestions(englishWord);
+      return { type: "notfound", word: englishWord, suggestions };
+    }
+
+    // status === "blocked"：词典 API 访问不通（比如当前预览沙盒），整体降级为 AI 生成
+    const card = await generateCardWithAIOnly(englishWord, direction);
+    if (!card) {
+      // AI 判断这不是一个真实词汇，不硬编释义，改为提示可能的拼写
+      const suggestions = await getAISpellingSuggestions(englishWord);
+      return { type: "notfound", word: englishWord, suggestions };
+    }
+    wordCardCache.set(cacheKey, card);
+    return { type: "card", card };
+  } catch (error) {
+    console.error("查词失败:", error);
+    return { type: "notfound", word: englishWord, suggestions: [] };
+  }
+}
+
+const bookAccents = [
+  { bar: "bg-emerald-500", chip: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  { bar: "bg-sky-500", chip: "bg-sky-50 text-sky-700 border-sky-200" },
+  { bar: "bg-amber-500", chip: "bg-amber-50 text-amber-700 border-amber-200" },
+  { bar: "bg-rose-500", chip: "bg-rose-50 text-rose-700 border-rose-200" },
+  { bar: "bg-violet-500", chip: "bg-violet-50 text-violet-700 border-violet-200" },
+  { bar: "bg-teal-500", chip: "bg-teal-50 text-teal-700 border-teal-200" },
+];
+
+function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="border border-[#E3ECE9] rounded-xl overflow-hidden bg-white">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-[#F8FAF9] transition-colors"
+      >
+        <span className="flex items-center gap-2 min-w-0">
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${accent.bar}`} />
+          <span className="font-semibold text-sm truncate">{card.word}</span>
+          <span className="text-xs text-[#8B9997] truncate">{card.translation}</span>
+        </span>
+        <span className="text-xs text-[#8B9997] shrink-0">{open ? "收起 ▲" : "展开 ▼"}</span>
+      </button>
+
+      {open && (
+        <div className="px-3 pb-3 pt-1 border-t border-[#E3ECE9] bg-[#F8FAF9] space-y-3 text-sm">
+          <div className="flex items-center justify-between">
+            {card.pronunciation && <p className="text-xs text-[#8B9997]">{card.pronunciation}</p>}
+            <button onClick={() => speakWord(card.word)} className="text-xs text-emerald-700 hover:underline">
+              🔊 朗读
+            </button>
+          </div>
+
+          {(card.senses || []).map((s, i) => (
+            <div key={i} className="space-y-0.5">
+              {s.part_of_speech && <p className="text-xs font-semibold text-[#8B9997]">{s.part_of_speech}</p>}
+              {(s.english_definition || s.definition_translation) && (
+                <p className="text-[#3E4E4C]">{s.english_definition || s.definition_translation}</p>
+              )}
+              {s.chinese_meaning && <p className="text-[#3E4E4C]">{s.chinese_meaning}</p>}
+              {s.example && <p className="text-[#5B6B69]">{highlightWord(s.example, card.word)}</p>}
+              {s.example_translation && <p className="text-xs text-[#8B9997]">{s.example_translation}</p>}
+              {s.learning_tip && <p className="text-xs text-emerald-700">💡 {s.learning_tip}</p>}
+            </div>
+          ))}
+
+          <div>
+            <p className="text-xs font-semibold text-[#5B6B69] mb-1">✏️ 我的笔记（想记什么都可以）</p>
+            <textarea
+              value={card.notes || ""}
+              onChange={(e) => onUpdateNotes(card.id, e.target.value)}
+              placeholder="比如：容易和 xxx 搞混、老师上课举的例子、自己编的联想……"
+              className="w-full text-xs rounded-lg border border-[#D9E4E1] px-2.5 py-2 outline-none focus:ring-2 focus:ring-emerald-300 min-h-[56px]"
+            />
+          </div>
+
+          <button
+            onClick={() => onRemove(bookId, card.id)}
+            className="text-xs text-[#8B9997] hover:text-red-500"
+          >
+            从本子中移除
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FlashcardOverlay({ book, cards, onClose }) {
+  const words = useMemo(
+    () => book.words.map((id) => cards.find((c) => c.id === id)).filter(Boolean),
+    [book, cards]
+  );
+  const [order, setOrder] = useState(() => words.map((w) => w.id));
+  const [index, setIndex] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+
+  useEffect(() => {
+    setOrder(words.map((w) => w.id));
+    setIndex(0);
+    setFlipped(false);
+  }, [book.id]);
+
+  const orderedWords = order.map((id) => words.find((w) => w.id === id)).filter(Boolean);
+  const current = orderedWords[index];
+
+  const goTo = (nextIndex) => {
+    if (nextIndex < 0 || nextIndex >= orderedWords.length) return;
+    setIndex(nextIndex);
+    setFlipped(false);
+  };
+
+  const shuffle = () => {
+    const shuffled = [...order];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    setOrder(shuffled);
+    setIndex(0);
+    setFlipped(false);
+  };
+
+  if (words.length === 0) {
+    return (
+      <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-2xl p-8 max-w-sm w-full text-center space-y-3">
+          <p className="text-sm text-[#5B6B69]">这个单词本还没有单词，先加几个词再来闪卡吧。</p>
+          <button onClick={onClose} className="text-sm font-semibold bg-emerald-600 text-white rounded-lg px-4 py-2">
+            关闭
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const firstSense = current?.senses?.[0];
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl p-6 max-w-lg w-full shadow-xl">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="font-bold">{book.name} · 闪卡</h3>
+            <p className="text-xs text-[#8B9997]">{index + 1} / {orderedWords.length}</p>
+          </div>
+          <button onClick={onClose} className="text-[#8B9997] hover:text-red-500 text-lg leading-none">×</button>
+        </div>
+
+        <div
+          onClick={() => setFlipped((f) => !f)}
+          className="min-h-[220px] rounded-2xl border-2 border-dashed border-emerald-200 bg-[#F8FAF9] flex flex-col items-center justify-center text-center px-6 py-8 cursor-pointer select-none"
+        >
+          {!flipped ? (
+            <>
+              <p className="text-3xl font-bold">{current.word}</p>
+              {current.pronunciation && <p className="text-sm text-[#8B9997] mt-2">{current.pronunciation}</p>}
+              <p className="text-xs text-[#8B9997] mt-6">点击卡片查看答案</p>
+            </>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xl font-semibold text-emerald-700">{current.translation}</p>
+              {firstSense?.example && (
+                <p className="text-sm text-[#3E4E4C]">{highlightWord(firstSense.example, current.word)}</p>
+              )}
+              {firstSense?.example_translation && (
+                <p className="text-xs text-[#8B9997]">{firstSense.example_translation}</p>
+              )}
+              {firstSense?.learning_tip && <p className="text-xs text-emerald-700 pt-1">💡 {firstSense.learning_tip}</p>}
+              {current.notes && <p className="text-xs text-[#5B6B69] pt-1 border-t border-[#E3ECE9] mt-2">✏️ {current.notes}</p>}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between mt-4">
+          <button
+            onClick={shuffle}
+            className="text-xs font-semibold text-[#5B6B69] hover:text-emerald-700 border border-[#D9E4E1] rounded-lg px-3 py-1.5"
+          >
+            🔀 打乱顺序
+          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => goTo(index - 1)}
+              disabled={index === 0}
+              className="text-xs font-semibold border border-[#D9E4E1] rounded-lg px-3 py-1.5 disabled:opacity-40"
+            >
+              ← 上一个
+            </button>
+            <button
+              onClick={() => goTo(index + 1)}
+              disabled={index === orderedWords.length - 1}
+              className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 disabled:opacity-40"
+            >
+              下一个 →
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LibraryView({
+  books,
+  cards,
+  onOpenBook,
+  showCreateBook,
+  bookNameDraft,
+  onBookNameDraftChange,
+  onConfirmCreateBook,
+  onCancelCreateBook,
+  onOpenCreateBook,
+  renamingBookId,
+  renameDraft,
+  onRenameDraftChange,
+  onStartRename,
+  onConfirmRename,
+  onCancelRename,
+  confirmDeleteBookId,
+  onRequestDelete,
+  onCancelDelete,
+  onPerformDelete,
+  onStudy,
+}) {
+  return (
+    <section className="space-y-5">
+      <div className="flex items-center justify-between flex-wrap gap-3 bg-white rounded-2xl p-6 shadow-sm border border-[#E3ECE9]">
+        <div>
+          <h2 className="text-xl font-bold">我的单词本库</h2>
+          <p className="text-sm text-[#8B9997] mt-1">
+            {books.length === 0 ? "还没有任何单词本" : `共 ${books.length} 个单词本 · ${cards.length} 个词条`}
+          </p>
+        </div>
+        <button
+          onClick={onOpenCreateBook}
+          className="text-sm font-semibold bg-emerald-600 text-white rounded-xl px-5 py-2.5 hover:bg-emerald-700 transition-colors shadow-sm"
+        >
+          + 新建单词本
+        </button>
+      </div>
+
+      {showCreateBook && (
+        <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
+          <input
+            autoFocus
+            value={bookNameDraft}
+            onChange={(e) => onBookNameDraftChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onConfirmCreateBook();
+              if (e.key === "Escape") onCancelCreateBook();
+            }}
+            placeholder="给新单词本起个名字，比如「日常词汇」"
+            className="flex-1 text-sm rounded-lg border border-emerald-300 px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300"
+          />
+          <button
+            onClick={onConfirmCreateBook}
+            className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-4 py-2 hover:bg-emerald-700"
+          >
+            创建
+          </button>
+          <button onClick={onCancelCreateBook} className="text-xs text-[#8B9997] hover:text-red-500 px-2">
+            取消
+          </button>
+        </div>
+      )}
+
+      {books.length === 0 ? (
+        <div className="bg-white rounded-2xl p-12 shadow-sm border border-dashed border-[#D9E4E1] text-center">
+          <div className="text-4xl mb-3">📚</div>
+          <p className="text-[#5B6B69] text-sm">
+            单词本是空的。点击上方"新建单词本"，或者在查词页点"加入单词本"会自动帮你创建第一个。
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          {books.map((book, index) => {
+            const accent = bookAccents[index % bookAccents.length];
+            const isRenaming = renamingBookId === book.id;
+            const isConfirmingDelete = confirmDeleteBookId === book.id;
+
+            return (
+              <div
+                key={book.id}
+                className="bg-white rounded-2xl shadow-sm border border-[#E3ECE9] overflow-hidden flex flex-col"
+              >
+                <div className={`h-1.5 ${accent.bar}`} />
+                <div className="p-5 flex flex-col gap-3">
+                  <div className="flex items-start justify-between gap-2">
+                    {isRenaming ? (
+                      <div className="flex-1 flex items-center gap-1">
+                        <input
+                          autoFocus
+                          value={renameDraft}
+                          onChange={(e) => onRenameDraftChange(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") onConfirmRename();
+                            if (e.key === "Escape") onCancelRename();
+                          }}
+                          className="flex-1 text-sm font-bold rounded-lg border border-emerald-300 px-2 py-1 outline-none focus:ring-2 focus:ring-emerald-300"
+                        />
+                        <button onClick={onConfirmRename} className="text-emerald-700 text-sm px-1">✓</button>
+                        <button onClick={onCancelRename} className="text-[#8B9997] text-sm px-1">×</button>
+                      </div>
+                    ) : (
+                      <div>
+                        <h3 className="font-bold text-lg leading-tight">{book.name}</h3>
+                        <p className="text-xs text-[#8B9997] mt-0.5">{book.words.length} 个单词</p>
+                      </div>
+                    )}
+
+                    {!isRenaming && (
+                      <div className="flex gap-1 shrink-0">
+                        {isConfirmingDelete ? (
+                          <>
+                            <button
+                              onClick={() => onPerformDelete(book.id)}
+                              title="确认删除"
+                              className="text-xs font-semibold text-red-600 hover:text-red-700 px-1.5 py-0.5"
+                            >
+                              确认删除
+                            </button>
+                            <button
+                              onClick={onCancelDelete}
+                              title="取消"
+                              className="text-xs text-[#8B9997] hover:text-emerald-700 px-1.5 py-0.5"
+                            >
+                              取消
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => onStartRename(book.id, book.name)}
+                              title="重命名"
+                              className="text-xs text-[#8B9997] hover:text-emerald-700 px-1.5 py-0.5"
+                            >
+                              ✎
+                            </button>
+                            <button
+                              onClick={() => onRequestDelete(book.id)}
+                              title="删除单词本"
+                              className="text-xs text-[#8B9997] hover:text-red-500 px-1.5 py-0.5"
+                            >
+                              🗑
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {!isRenaming && (
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => onOpenBook(book.id)}
+                        className="text-sm font-semibold bg-[#1B2B2A] text-white rounded-lg px-4 py-2.5 hover:bg-[#0f1918]"
+                      >
+                        打开单词本 →
+                      </button>
+                      {book.words.length > 0 && (
+                        <button
+                          onClick={() => onStudy(book.id)}
+                          className="text-sm font-semibold bg-white border border-[#D9E4E1] text-[#3E4E4C] rounded-lg px-4 py-2.5 hover:bg-[#F3F6F5]"
+                        >
+                          🎴 闪卡
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function BookDetailView({
+  book,
+  cards,
+  onBack,
+  isRenaming,
+  renameDraft,
+  onRenameDraftChange,
+  onStartRename,
+  onConfirmRename,
+  onCancelRename,
+  isConfirmingDelete,
+  onRequestDelete,
+  onCancelDelete,
+  onPerformDelete,
+  onRemoveWord,
+  onUpdateNotes,
+  addQuery,
+  onAddQueryChange,
+  onAddWord,
+  addLoading,
+  addNotFound,
+  addSuggestions,
+  learningMode,
+  onStudy,
+}) {
+  const [filterQuery, setFilterQuery] = useState("");
+  const words = book.words.map((id) => cards.find((c) => c.id === id)).filter(Boolean);
+  const filteredWords = filterQuery.trim()
+    ? words.filter(
+        (c) =>
+          c.word.toLowerCase().includes(filterQuery.trim().toLowerCase()) ||
+          (c.translation || "").toLowerCase().includes(filterQuery.trim().toLowerCase())
+      )
+    : words;
+
+  return (
+    <section className="fixed inset-0 z-40 bg-[#F3F6F5] overflow-y-auto">
+      <div className="max-w-2xl mx-auto p-4 md:p-8 space-y-4">
+        <button onClick={onBack} className="text-sm font-semibold text-[#5B6B69] hover:text-emerald-700">
+          ← 返回单词本库
+        </button>
+
+        <div className="bg-white rounded-2xl p-5 shadow-sm border border-[#E3ECE9]">
+          <div className="flex items-start justify-between gap-2">
+            {isRenaming ? (
+              <div className="flex-1 flex items-center gap-1">
+                <input
+                  autoFocus
+                  value={renameDraft}
+                  onChange={(e) => onRenameDraftChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onConfirmRename();
+                    if (e.key === "Escape") onCancelRename();
+                  }}
+                  className="flex-1 text-lg font-bold rounded-lg border border-emerald-300 px-2 py-1 outline-none focus:ring-2 focus:ring-emerald-300"
+                />
+                <button onClick={onConfirmRename} className="text-emerald-700 px-1">✓</button>
+                <button onClick={onCancelRename} className="text-[#8B9997] px-1">×</button>
+              </div>
+            ) : (
+              <div>
+                <h2 className="text-xl font-bold">{book.name}</h2>
+                <p className="text-xs text-[#8B9997] mt-0.5">{words.length} 个单词</p>
+              </div>
+            )}
+
+            {!isRenaming && (
+              <div className="flex gap-1 shrink-0 items-center">
+                {words.length > 0 && (
+                  <button
+                    onClick={() => onStudy(book.id)}
+                    className="text-xs font-semibold bg-[#1B2B2A] text-white rounded-lg px-3 py-1.5 hover:bg-[#0f1918] mr-1"
+                  >
+                    🎴 闪卡
+                  </button>
+                )}
+                {isConfirmingDelete ? (
+                  <>
+                    <button onClick={onPerformDelete} className="text-xs font-semibold text-red-600 px-1.5 py-0.5">
+                      确认删除
+                    </button>
+                    <button onClick={onCancelDelete} className="text-xs text-[#8B9997] px-1.5 py-0.5">
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button onClick={onStartRename} title="重命名" className="text-xs text-[#8B9997] hover:text-emerald-700 px-1.5 py-0.5">
+                      ✎
+                    </button>
+                    <button onClick={onRequestDelete} title="删除单词本" className="text-xs text-[#8B9997] hover:text-red-500 px-1.5 py-0.5">
+                      🗑
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-[#E3ECE9] space-y-2">
+          <p className="text-xs font-semibold text-[#5B6B69]">
+            {learningMode === "learn-zh" ? "Add a new word to this notebook" : "直接给这个本子加新词"}
+          </p>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              value={addQuery}
+              onChange={(e) => onAddQueryChange(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && onAddWord()}
+              placeholder={learningMode === "learn-zh" ? "Type a word…" : "输入单词，回车直接加入本子"}
+              className="flex-1 text-sm rounded-lg border border-[#D9E4E1] px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300"
+            />
+            <button
+              onClick={onAddWord}
+              disabled={addLoading}
+              className="text-sm font-semibold bg-emerald-600 disabled:bg-emerald-300 text-white rounded-lg px-4 py-2 hover:bg-emerald-700"
+            >
+              {addLoading ? "…" : "查询并加入"}
+            </button>
+          </div>
+          {addNotFound && (
+            <div className="text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-3 py-2">
+              没有找到 "{addNotFound}"
+              {addSuggestions.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {addSuggestions.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => onAddWord(s)}
+                      className="text-xs font-semibold bg-white border border-amber-300 text-amber-800 rounded-full px-2.5 py-1 hover:bg-amber-100"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-2xl p-4 shadow-sm border border-[#E3ECE9] space-y-3">
+          <input
+            value={filterQuery}
+            onChange={(e) => setFilterQuery(e.target.value)}
+            placeholder={learningMode === "learn-zh" ? "Search words in this notebook" : "在这个本子已有的词里搜索"}
+            className="w-full text-sm rounded-lg border border-[#D9E4E1] px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300"
+          />
+
+          {filteredWords.length === 0 ? (
+            <p className="text-xs text-[#8B9997] py-4 text-center">
+              {words.length === 0 ? "这个本子还是空的，上面加个词试试" : "没有匹配的词"}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {filteredWords.map((card) => (
+                <WordAccordionRow
+                  key={card.id}
+                  card={card}
+                  accent={bookAccents[0]}
+                  bookId={book.id}
+                  onRemove={onRemoveWord}
+                  onUpdateNotes={onUpdateNotes}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export default function WordLearningApp() {
+  const [sessionUser, setSessionUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
+
+  const [learningMode, setLearningMode] = useState("learn-en"); // "learn-en": 母语中文学英语 | "learn-zh": 母语英文学中文
+  const [direction, setDirection] = useState("en->zh");
+  const [query, setQuery] = useState("");
+  const [recentSearches, setRecentSearches] = useState([]);
+  const [selectedWord, setSelectedWord] = useState(null);
+  const [selectedSenseIndex, setSelectedSenseIndex] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
+  const [spellSuggestions, setSpellSuggestions] = useState([]);
+  const [maybeSuggestions, setMaybeSuggestions] = useState([]);
+  const [notFoundWord, setNotFoundWord] = useState("");
+
+  const [cards, setCards] = useState(() => {
+    const stored = localStorage.getItem("word-cards");
+    return stored ? JSON.parse(stored) : [];
+  });
+  const [books, setBooks] = useState(() => {
+    const stored = localStorage.getItem("word-books");
+    return stored ? JSON.parse(stored) : [];
+  });
+  const [settings, setSettings] = useState(() => {
+    const stored = localStorage.getItem("word-settings");
+    return stored ? JSON.parse(stored) : defaultSettings;
+  });
+  const [targetBookId, setTargetBookId] = useState("");
+
+  useEffect(() => setSelectedSenseIndex(0), [selectedWord?.word]);
+
+  useEffect(() => {
+    localStorage.setItem("word-cards", JSON.stringify(cards));
+  }, [cards]);
+
+  useEffect(() => {
+    localStorage.setItem("word-books", JSON.stringify(books));
+  }, [books]);
+
+  useEffect(() => {
+    localStorage.setItem("word-settings", JSON.stringify(settings));
+  }, [settings]);
+
+  // 真正的账号系统：登录状态由 Supabase 维护（浏览器里存的是一个安全令牌，不是密码）。
+  // 打开网页时先问 Supabase "现在是谁登录着"，之后只要登录状态变化（登录/登出/token刷新）就同步更新。
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSessionUser(session?.user ?? null);
+      setAuthLoading(false);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSessionUser(session?.user ?? null);
+    });
+
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    if (!email || !password) {
+      setAuthMessage("邮箱和密码都不能为空");
+      return;
+    }
+    setAuthMessage("");
+
+    if (authMode === "register") {
+      const { error } = await supabase.auth.signUp({ email, password });
+      if (error) {
+        setAuthMessage(error.message);
+        return;
+      }
+      setAuthMessage("注册成功！如果开启了邮箱验证，请去邮箱点确认链接后再登录。");
+      return;
+    }
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) {
+      setAuthMessage(error.message);
+    } else {
+      setAuthMessage("登录成功");
+    }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
+  // 统一的"查词 + 写入 cards"逻辑：如果这个词（在当前学习模式下）已经存在，
+  // 复用原来的 id 和笔记，只更新内容——这样单词本里存的 id 引用永远不会失效。
+  // （之前的 bug：每次搜索都生成新 id，同名词会把旧条目整个替换掉，导致单词本里的引用找不到对应单词，看起来像"加不进去"）
+  const searchAndUpsertCard = async (word) => {
+    const result = learningMode === "learn-zh" ? await lookupChineseWord(word) : await lookupWord(word, direction);
+    if (result.type !== "card") {
+      return { ok: false, word: result.word || word, suggestions: result.suggestions || [] };
+    }
+    const rawCard = { ...result.card, mode: learningMode };
+    let finalCard = rawCard;
+    setCards((cur) => {
+      const idx = cur.findIndex(
+        (c) => c.mode === learningMode && c.word.toLowerCase() === rawCard.word.toLowerCase()
+      );
+      if (idx !== -1) {
+        finalCard = { ...rawCard, id: cur[idx].id, notes: cur[idx].notes || rawCard.notes || "" };
+        const next = [...cur];
+        next[idx] = finalCard;
+        return next;
+      }
+      finalCard = rawCard;
+      return [rawCard, ...cur];
+    });
+    return { ok: true, card: finalCard, maybeSuggestions: result.maybeSuggestions || [] };
+  };
+
+  const handleSearch = async (overrideWord) => {
+    const word = (overrideWord ?? query).trim();
+    if (!word) return;
+    setIsLoading(true);
+    setSpellSuggestions([]);
+    setMaybeSuggestions([]);
+
+    const result = await searchAndUpsertCard(word);
+
+    if (result.ok) {
+      setSelectedWord(result.card);
+      setSelectedSenseIndex(0);
+      setQuery(result.card.word);
+      setNotFoundWord("");
+      setMaybeSuggestions(result.maybeSuggestions || []);
+      setRecentSearches((cur) => {
+        const norm = normalizeSearchTerm(result.card.word);
+        const filtered = cur.filter((item) => normalizeSearchTerm(item) !== norm);
+        return [result.card.word, ...filtered].slice(0, 5);
+      });
+    } else {
+      setNotFoundWord(result.word);
+      setSpellSuggestions(result.suggestions);
+    }
+
+    setIsLoading(false);
+  };
+
+  // 单词本详情页里"直接查词加入"用的状态和逻辑
+  const [bookAddQuery, setBookAddQuery] = useState("");
+  const [bookAddLoading, setBookAddLoading] = useState(false);
+  const [bookAddNotFound, setBookAddNotFound] = useState("");
+  const [bookAddSuggestions, setBookAddSuggestions] = useState([]);
+
+  const handleAddWordToOpenBook = async (bookId, overrideWord) => {
+    const word = (overrideWord ?? bookAddQuery).trim();
+    if (!word) return;
+    setBookAddLoading(true);
+    setBookAddSuggestions([]);
+    const result = await searchAndUpsertCard(word);
+    if (result.ok) {
+      addToBook(bookId, result.card.id);
+      setBookAddQuery("");
+      setBookAddNotFound("");
+    } else {
+      setBookAddNotFound(result.word);
+      setBookAddSuggestions(result.suggestions);
+    }
+    setBookAddLoading(false);
+  };
+
+  // 新建单词本：用页面内的输入框代替 window.prompt（沙盒环境里浏览器弹窗经常被屏蔽，导致之前"新建"一直失败）
+  const [showCreateBook, setShowCreateBook] = useState(false);
+  const [openBookId, setOpenBookId] = useState(null);
+  const [studyBookId, setStudyBookId] = useState(null);
+  const [bookNameDraft, setBookNameDraft] = useState("");
+  const [pendingCardId, setPendingCardId] = useState(null);
+
+  const openCreateBook = (cardId = null) => {
+    setPendingCardId(cardId);
+    setBookNameDraft("");
+    setShowCreateBook(true);
+  };
+
+  const cancelCreateBook = () => {
+    setShowCreateBook(false);
+    setPendingCardId(null);
+    setBookNameDraft("");
+  };
+
+  const confirmCreateBook = () => {
+    const name = bookNameDraft.trim();
+    if (!name) return;
+    const newBook = { id: `book-${Date.now()}`, name, words: pendingCardId ? [pendingCardId] : [] };
+    setBooks((cur) => [...cur, newBook]);
+    setTargetBookId(newBook.id);
+    cancelCreateBook();
+  };
+
+  const addToBook = (bookId, cardId) => {
+    setBooks((cur) =>
+      cur.map((book) =>
+        book.id === bookId
+          ? { ...book, words: book.words.includes(cardId) ? book.words : [...book.words, cardId] }
+          : book
+      )
+    );
+  };
+
+  const addWordToBook = (cardId) => {
+    if (books.length === 0) {
+      openCreateBook(cardId);
+      return;
+    }
+    const bookId = targetBookId || books[0].id;
+    addToBook(bookId, cardId);
+  };
+
+  // 重命名：点击铅笔图标后标题变成输入框，而不是弹窗
+  const [renamingBookId, setRenamingBookId] = useState(null);
+  const [renameDraft, setRenameDraft] = useState("");
+
+  const startRenameBook = (bookId, currentName) => {
+    setRenamingBookId(bookId);
+    setRenameDraft(currentName);
+  };
+
+  const confirmRenameBook = () => {
+    const name = renameDraft.trim();
+    if (!name) return;
+    setBooks((cur) => cur.map((b) => (b.id === renamingBookId ? { ...b, name } : b)));
+    setRenamingBookId(null);
+  };
+
+  const cancelRenameBook = () => setRenamingBookId(null);
+
+  // 删除：先点一次进入"确定删除？"状态，再点一次才真正删除，而不是弹窗确认
+  const [confirmDeleteBookId, setConfirmDeleteBookId] = useState(null);
+
+  const requestDeleteBook = (bookId) => setConfirmDeleteBookId(bookId);
+  const cancelDeleteBook = () => setConfirmDeleteBookId(null);
+
+  const performDeleteBook = (bookId) => {
+    setBooks((cur) => cur.filter((b) => b.id !== bookId));
+    if (targetBookId === bookId) setTargetBookId("");
+    if (openBookId === bookId) setOpenBookId(null);
+    setConfirmDeleteBookId(null);
+  };
+
+  const removeWordFromBook = (bookId, cardId) => {
+    setBooks((cur) =>
+      cur.map((b) => (b.id === bookId ? { ...b, words: b.words.filter((id) => id !== cardId) } : b))
+    );
+  };
+
+  const updateCardNotes = (cardId, notes) => {
+    setCards((cur) => cur.map((c) => (c.id === cardId ? { ...c, notes } : c)));
+    setSelectedWord((cur) => (cur && cur.id === cardId ? { ...cur, notes } : cur));
+  };
+
+
+
+  const handleSettingChange = (key) => setSettings((cur) => ({ ...cur, [key]: !cur[key] }));
+
+  const sense = selectedWord?.senses?.[selectedSenseIndex];
+
+  return (
+    <div className="min-h-screen w-full bg-[#F3F6F5] text-[#1B2B2A] p-4 md:p-8" style={{ fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
+      <div className="max-w-6xl mx-auto space-y-6">
+
+        {/* Header */}
+        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white rounded-2xl p-6 shadow-sm border border-[#E3ECE9]">
+          <div>
+            <p className="text-xs tracking-widest text-emerald-600 font-semibold uppercase">Translate Psychic</p>
+            <h1 className="text-2xl md:text-3xl font-bold mt-1">
+              {learningMode === "learn-zh" ? "Learn Chinese" : "背单词助手"}
+            </h1>
+            <p className="text-sm text-[#5B6B69] mt-2 max-w-md">
+              {learningMode === "learn-zh"
+                ? "Type a word in English, Pinyin, or Chinese to see its meaning, pronunciation, and example sentences."
+                : "输入单词即可查看翻译、例句与学习提示，并整理进多个独立单词本。"}
+            </p>
+          </div>
+          <div className="w-full md:w-72">
+            {authLoading ? (
+              <div className="bg-[#F3F6F5] rounded-xl p-4 text-sm text-[#8B9997]">正在检查登录状态…</div>
+            ) : sessionUser ? (
+              <div className="bg-[#F3F6F5] rounded-xl p-4 text-sm">
+                <strong className="block">{sessionUser.email}</strong>
+                <p className="text-[#5B6B69] mt-1">已登录</p>
+                <button
+                  onClick={handleLogout}
+                  className="mt-3 text-xs font-medium text-emerald-700 hover:underline"
+                >
+                  退出登录
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleAuth} className="bg-[#F3F6F5] rounded-xl p-4 space-y-2">
+                <h2 className="text-sm font-semibold">{authMode === "login" ? "登录" : "注册"}</h2>
+                <input
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="邮箱"
+                  className="w-full text-sm rounded-lg border border-[#D9E4E1] px-3 py-1.5 outline-none focus:ring-2 focus:ring-emerald-300"
+                />
+                <input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  type="password"
+                  placeholder="密码"
+                  className="w-full text-sm rounded-lg border border-[#D9E4E1] px-3 py-1.5 outline-none focus:ring-2 focus:ring-emerald-300"
+                />
+                <div className="flex items-center justify-between pt-1">
+                  <button type="submit" className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 hover:bg-emerald-700">
+                    {authMode === "login" ? "登录" : "注册"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}
+                    className="text-xs text-[#5B6B69] hover:underline"
+                  >
+                    切换为{authMode === "login" ? "注册" : "登录"}
+                  </button>
+                </div>
+                {authMessage && <p className="text-xs text-emerald-700">{authMessage}</p>}
+              </form>
+            )}
+          </div>
+        </header>
+
+        {/* 导航条：学习模式 + 页面切换 */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-white rounded-2xl p-3 shadow-sm border border-[#E3ECE9]">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold text-[#8B9997] pl-1">学习模式</span>
+            <div className="flex gap-1 bg-[#F3F6F5] rounded-full p-1">
+              <button
+                onClick={() => setLearningMode("learn-en")}
+                className={`text-xs font-semibold rounded-full px-3 py-1.5 transition-colors ${
+                  learningMode === "learn-en" ? "bg-emerald-600 text-white" : "text-[#5B6B69] hover:bg-emerald-50"
+                }`}
+              >
+                学英语 · 中文母语
+              </button>
+              <button
+                onClick={() => setLearningMode("learn-zh")}
+                className={`text-xs font-semibold rounded-full px-3 py-1.5 transition-colors ${
+                  learningMode === "learn-zh" ? "bg-emerald-600 text-white" : "text-[#5B6B69] hover:bg-emerald-50"
+                }`}
+              >
+                Learn Chinese · English speaker
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 sm:ml-auto text-xs">
+            <a href="#search-section" className="text-[#5B6B69] hover:text-emerald-700 font-semibold">
+              ↓ 查词
+            </a>
+            <span className="text-[#D9E4E1]">|</span>
+            <a href="#library-section" className="text-[#5B6B69] hover:text-emerald-700 font-semibold">
+              ↓ 单词本库
+            </a>
+          </div>
+        </div>
+
+        <main className="space-y-6">
+          {openBookId && books.find((b) => b.id === openBookId) ? (
+            <BookDetailView
+                book={books.find((b) => b.id === openBookId)}
+                cards={cards}
+                onBack={() => setOpenBookId(null)}
+                isRenaming={renamingBookId === openBookId}
+                renameDraft={renameDraft}
+                onRenameDraftChange={setRenameDraft}
+                onStartRename={() => startRenameBook(openBookId, books.find((b) => b.id === openBookId).name)}
+                onConfirmRename={confirmRenameBook}
+                onCancelRename={cancelRenameBook}
+                isConfirmingDelete={confirmDeleteBookId === openBookId}
+                onRequestDelete={() => requestDeleteBook(openBookId)}
+                onCancelDelete={cancelDeleteBook}
+                onPerformDelete={() => performDeleteBook(openBookId)}
+                onRemoveWord={removeWordFromBook}
+                onUpdateNotes={updateCardNotes}
+                addQuery={bookAddQuery}
+                onAddQueryChange={setBookAddQuery}
+                onAddWord={(overrideWord) => handleAddWordToOpenBook(openBookId, overrideWord)}
+                addLoading={bookAddLoading}
+                addNotFound={bookAddNotFound}
+                addSuggestions={bookAddSuggestions}
+                learningMode={learningMode}
+                onStudy={setStudyBookId}
+              />
+          ) : (
+            <>
+              <section id="search-section" className="max-w-2xl mx-auto bg-white rounded-2xl p-6 shadow-sm border border-[#E3ECE9] space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold text-lg">{learningMode === "learn-zh" ? "Search" : "查词"}</h2>
+                <button
+                  onClick={() => handleSearch()}
+                  disabled={isLoading}
+                  className="text-sm font-semibold bg-emerald-600 disabled:bg-emerald-300 text-white rounded-lg px-4 py-2 hover:bg-emerald-700 transition-colors"
+                >
+                  {isLoading
+                    ? learningMode === "learn-zh"
+                      ? "Loading…"
+                      : "生成中…"
+                    : learningMode === "learn-zh"
+                    ? "Search"
+                    : "查词并生成"}
+                </button>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                  placeholder={learningMode === "learn-zh" ? "Type English, Pinyin, or 中文" : "输入单词，例如 apple"}
+                  className="flex-1 text-sm rounded-lg border border-[#D9E4E1] px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300"
+                />
+                {learningMode === "learn-en" && (
+                  <select
+                    value={direction}
+                    onChange={(e) => setDirection(e.target.value)}
+                    className="text-sm rounded-lg border border-[#D9E4E1] px-2 py-2"
+                  >
+                    <option value="en->zh">English → 中文</option>
+                    <option value="zh->en">中文 → English</option>
+                  </select>
+                )}
+              </div>
+
+              <div>
+                <h3 className="text-xs font-semibold text-[#5B6B69] mb-2">
+                  {learningMode === "learn-zh" ? "Recent searches" : "最近搜索"}
+                </h3>
+                {recentSearches.length === 0 ? (
+                  <p className="text-xs text-[#8B9997]">
+                    {learningMode === "learn-zh" ? "No recent searches yet." : "最近没有搜索记录。"}
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {recentSearches.map((item) => (
+                      <div
+                        key={item}
+                        className="flex items-center gap-1 bg-[#F3F6F5] hover:bg-emerald-50 border border-[#E3ECE9] rounded-full pl-3 pr-1.5 py-1"
+                      >
+                        <button
+                          onClick={() => {
+                            setQuery(item);
+                            handleSearch(item);
+                          }}
+                          className="text-xs"
+                        >
+                          {item}
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRecentSearches((cur) => cur.filter((i) => i !== item));
+                          }}
+                          aria-label={`删除 ${item}`}
+                          title="删除"
+                          className="text-[#8B9997] hover:text-red-500 text-xs leading-none px-0.5"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {spellSuggestions.length > 0 && (
+                <div className="text-sm bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3">
+                  没有找到 "{notFoundWord}"，您是否要搜索：
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {spellSuggestions.map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => {
+                          setQuery(s);
+                          handleSearch(s);
+                        }}
+                        className="text-xs font-semibold bg-white border border-amber-300 text-amber-800 rounded-full px-3 py-1 hover:bg-amber-100"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {spellSuggestions.length === 0 && notFoundWord && (
+                <div className="text-sm bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3">
+                  没有找到 "{notFoundWord}"{learningMode === "learn-en" ? "，也没有类似的拼写建议，换个词试试？" : "，换个词试试？"}
+                </div>
+              )}
+
+              {maybeSuggestions.length > 0 && selectedWord && (
+                <div className="text-sm bg-sky-50 border border-sky-200 text-sky-800 rounded-xl px-4 py-3">
+                  "{selectedWord.word}" 不算常见，你是不是想找：
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {maybeSuggestions.map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => {
+                          setQuery(s);
+                          handleSearch(s);
+                        }}
+                        className="text-xs font-semibold bg-white border border-sky-300 text-sky-800 rounded-full px-3 py-1 hover:bg-sky-100"
+                      >
+                        {s}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setMaybeSuggestions([])}
+                      className="text-xs font-semibold text-sky-700 underline px-1"
+                    >
+                      不，就是要查 "{selectedWord.word}"
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-[#F8FAF9] rounded-xl p-4 border border-[#E3ECE9]">
+                {selectedWord ? (
+                  <>
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <h3 className="text-xl font-bold flex items-center gap-2">
+                          {selectedWord.word}
+                          <button
+                            onClick={() => speakWord(selectedWord.mode === "learn-zh" ? selectedWord.word : selectedWord.word)}
+                            title="朗读"
+                            className="text-base hover:scale-110 transition-transform"
+                          >
+                            🔊
+                          </button>
+                        </h3>
+                        {settings.showPronunciation && (
+                          <p className="text-sm text-[#5B6B69]">{selectedWord.pronunciation}</p>
+                        )}
+                      </div>
+                      {settings.showTranslation && (
+                        <span className="text-xs font-semibold bg-emerald-100 text-emerald-700 rounded-full px-3 py-1">
+                          {selectedWord.translation}
+                        </span>
+                      )}
+                    </div>
+
+                    {selectedWord.senses?.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-3">
+                        {selectedWord.senses.map((s, i) => (
+                          <button
+                            key={i}
+                            onClick={() => setSelectedSenseIndex(i)}
+                            className={`text-xs rounded-full px-3 py-1 border ${
+                              i === selectedSenseIndex
+                                ? "bg-emerald-600 text-white border-emerald-600"
+                                : "bg-white text-[#5B6B69] border-[#D9E4E1]"
+                            }`}
+                          >
+                            {s.part_of_speech || "释义"} {i + 1}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {sense ? (
+                      <div className="mt-3 space-y-1.5 text-sm">
+                        {selectedWord.mode === "learn-zh" ? (
+                          <>
+                            <p><span className="text-[#8B9997]">Part of speech: </span>{sense.part_of_speech || "—"}</p>
+                            <p><span className="text-[#8B9997]">Definition: </span>{sense.definition_translation}</p>
+                            {settings.showExample && sense.example && (
+                              <>
+                                <p><span className="text-[#8B9997]">Example: </span>{highlightWord(sense.example, selectedWord.word)}</p>
+                                {sense.example_translation && (
+                                  <p><span className="text-[#8B9997]">Translation: </span>{sense.example_translation}</p>
+                                )}
+                              </>
+                            )}
+                            {settings.showTip && sense.learning_tip && (
+                              <p className="pt-1 text-emerald-700">💡 {sense.learning_tip}</p>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <p><span className="text-[#8B9997]">词性：</span>{sense.part_of_speech || "——"}</p>
+                            <p><span className="text-[#8B9997]">Definition：</span>{sense.english_definition}</p>
+                            <p><span className="text-[#8B9997]">中文释义：</span>{sense.chinese_meaning}</p>
+                            {settings.showExample && sense.example && (
+                              <>
+                                <p><span className="text-[#8B9997]">Example：</span>{highlightWord(sense.example, selectedWord.word)}</p>
+                                {sense.example_translation && (
+                                  <p><span className="text-[#8B9997]">例句翻译：</span>{sense.example_translation}</p>
+                                )}
+                              </>
+                            )}
+                            {settings.showTip && sense.learning_tip && (
+                              <p className="pt-1 text-emerald-700">💡 {sense.learning_tip}</p>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-[#8B9997] mt-3">
+                        {learningMode === "learn-zh" ? "No definition available." : "该词暂无可用释义。"}
+                      </p>
+                    )}
+
+                    <div className="mt-3">
+                      <p className="text-xs font-semibold text-[#5B6B69] mb-1">
+                        ✏️ {learningMode === "learn-zh" ? "My notes" : "我的笔记（想记什么都可以）"}
+                      </p>
+                      <textarea
+                        value={selectedWord.notes || ""}
+                        onChange={(e) => updateCardNotes(selectedWord.id, e.target.value)}
+                        placeholder={
+                          learningMode === "learn-zh"
+                            ? "Write anything you want to remember…"
+                            : "比如：容易搞混的词、老师举的例子、自己编的联想……"
+                        }
+                        className="w-full text-sm rounded-lg border border-[#D9E4E1] px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300 min-h-[56px]"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 mt-4 pt-3 border-t border-[#E3ECE9]">
+                      {books.length > 0 && (
+                        <select
+                          value={targetBookId || books[0].id}
+                          onChange={(e) => setTargetBookId(e.target.value)}
+                          className="text-xs rounded-lg border border-[#D9E4E1] px-2 py-1.5"
+                        >
+                          {books.map((b) => (
+                            <option key={b.id} value={b.id}>{b.name}</option>
+                          ))}
+                        </select>
+                      )}
+                      <button
+                        onClick={() => addWordToBook(selectedWord.id)}
+                        className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 hover:bg-emerald-700"
+                      >
+                        {books.length === 0 ? "新建单词本并加入" : "加入单词本"}
+                      </button>
+                      {books.length > 0 && (
+                        <button onClick={() => openCreateBook()} className="text-xs text-emerald-700 hover:underline">
+                          + 新建
+                        </button>
+                      )}
+                    </div>
+
+                    {showCreateBook && (
+                      <div className="flex items-center gap-2 mt-2 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2">
+                        <input
+                          autoFocus
+                          value={bookNameDraft}
+                          onChange={(e) => setBookNameDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") confirmCreateBook();
+                            if (e.key === "Escape") cancelCreateBook();
+                          }}
+                          placeholder="给新单词本起个名字"
+                          className="flex-1 text-sm rounded-lg border border-emerald-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-emerald-300"
+                        />
+                        <button
+                          onClick={confirmCreateBook}
+                          className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 hover:bg-emerald-700"
+                        >
+                          创建
+                        </button>
+                        <button onClick={cancelCreateBook} className="text-xs text-[#8B9997] hover:text-red-500 px-2">
+                          取消
+                        </button>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-[#8B9997]">
+                    {learningMode === "learn-zh" ? "Type a word to get started." : "请输入一个单词"}
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <h3 className="text-xs font-semibold text-[#5B6B69] mb-2">
+                  {learningMode === "learn-zh" ? "Display options" : "显示偏好"}
+                </h3>
+                <div className="grid grid-cols-2 gap-2">
+                  {Object.entries(defaultSettings).map(([key]) => (
+                    <label key={key} className="flex items-center gap-2 text-sm text-[#3E4E4C]">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(settings[key])}
+                        onChange={() => handleSettingChange(key)}
+                        className="accent-emerald-600"
+                      />
+                      {settingLabels[key]}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              </section>
+
+              <section id="library-section">
+                <LibraryView
+                  books={books}
+                  cards={cards}
+                  onOpenBook={(id) => {
+                    setOpenBookId(id);
+                    setBookAddQuery("");
+                    setBookAddNotFound("");
+                    setBookAddSuggestions([]);
+                  }}
+                  showCreateBook={showCreateBook}
+                  bookNameDraft={bookNameDraft}
+                  onBookNameDraftChange={setBookNameDraft}
+                  onConfirmCreateBook={confirmCreateBook}
+                  onCancelCreateBook={cancelCreateBook}
+                  onOpenCreateBook={() => openCreateBook()}
+                  renamingBookId={renamingBookId}
+                  renameDraft={renameDraft}
+                  onRenameDraftChange={setRenameDraft}
+                  onStartRename={startRenameBook}
+                  onConfirmRename={confirmRenameBook}
+                  onCancelRename={cancelRenameBook}
+                  confirmDeleteBookId={confirmDeleteBookId}
+                  onRequestDelete={requestDeleteBook}
+                  onCancelDelete={cancelDeleteBook}
+                  onPerformDelete={performDeleteBook}
+                  onStudy={setStudyBookId}
+                />
+              </section>
+            </>
+          )}
+        </main>
+
+        {studyBookId && books.find((b) => b.id === studyBookId) && (
+          <FlashcardOverlay
+            book={books.find((b) => b.id === studyBookId)}
+            cards={cards}
+            onClose={() => setStudyBookId(null)}
+          />
+        )}
+
+      </div>
+    </div>
+  );
+}
