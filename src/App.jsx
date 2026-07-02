@@ -15,6 +15,13 @@ const settingLabels = {
   showTip: "显示学习提示",
 };
 
+const settingLabelsEn = {
+  showTranslation: "Show translation",
+  showPronunciation: "Show pronunciation",
+  showExample: "Show examples",
+  showTip: "Show learning tips",
+};
+
 function normalizeSearchTerm(term) {
   return term.trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -399,8 +406,9 @@ const bookAccents = [
   { bar: "bg-teal-500", chip: "bg-teal-50 text-teal-700 border-teal-200" },
 ];
 
-function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes }) {
+function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes, uiLang }) {
   const [open, setOpen] = useState(false);
+  const en = uiLang === "en";
 
   return (
     <div className="border border-[#E3ECE9] rounded-xl overflow-hidden bg-white">
@@ -413,7 +421,9 @@ function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes }) {
           <span className="font-semibold text-sm truncate">{card.word}</span>
           <span className="text-xs text-[#8B9997] truncate">{card.translation}</span>
         </span>
-        <span className="text-xs text-[#8B9997] shrink-0">{open ? "收起 ▲" : "展开 ▼"}</span>
+        <span className="text-xs text-[#8B9997] shrink-0">
+          {open ? (en ? "Collapse ▲" : "收起 ▲") : en ? "Expand ▼" : "展开 ▼"}
+        </span>
       </button>
 
       {open && (
@@ -421,7 +431,7 @@ function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes }) {
           <div className="flex items-center justify-between">
             {card.pronunciation && <p className="text-xs text-[#8B9997]">{card.pronunciation}</p>}
             <button onClick={() => speakWord(card.word)} className="text-xs text-emerald-700 hover:underline">
-              🔊 朗读
+              {en ? "🔊 Listen" : "🔊 朗读"}
             </button>
           </div>
 
@@ -439,11 +449,17 @@ function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes }) {
           ))}
 
           <div>
-            <p className="text-xs font-semibold text-[#5B6B69] mb-1">✏️ 我的笔记（想记什么都可以）</p>
+            <p className="text-xs font-semibold text-[#5B6B69] mb-1">
+              {en ? "✏️ My notes" : "✏️ 我的笔记（想记什么都可以）"}
+            </p>
             <textarea
               value={card.notes || ""}
               onChange={(e) => onUpdateNotes(card.id, e.target.value)}
-              placeholder="比如：容易和 xxx 搞混、老师上课举的例子、自己编的联想……"
+              placeholder={
+                en
+                  ? "e.g. words easy to confuse, an example from class, your own memory trick…"
+                  : "比如：容易和 xxx 搞混、老师上课举的例子、自己编的联想……"
+              }
               className="w-full text-xs rounded-lg border border-[#D9E4E1] px-2.5 py-2 outline-none focus:ring-2 focus:ring-emerald-300 min-h-[56px]"
             />
           </div>
@@ -452,7 +468,7 @@ function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes }) {
             onClick={() => onRemove(bookId, card.id)}
             className="text-xs text-[#8B9997] hover:text-red-500"
           >
-            从本子中移除
+            {en ? "Remove from notebook" : "从本子中移除"}
           </button>
         </div>
       )}
@@ -460,7 +476,8 @@ function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes }) {
   );
 }
 
-function FlashcardOverlay({ book, cards, onClose }) {
+function FlashcardOverlay({ book, cards, onClose, uiLang }) {
+  const en = uiLang === "en";
   const words = useMemo(
     () => book.words.map((id) => cards.find((c) => c.id === id)).filter(Boolean),
     [book, cards]
@@ -499,9 +516,11 @@ function FlashcardOverlay({ book, cards, onClose }) {
     return (
       <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
         <div className="bg-white rounded-2xl p-8 max-w-sm w-full text-center space-y-3">
-          <p className="text-sm text-[#5B6B69]">这个单词本还没有单词，先加几个词再来闪卡吧。</p>
+          <p className="text-sm text-[#5B6B69]">
+            {en ? "This notebook has no words yet — add a few before studying." : "这个单词本还没有单词，先加几个词再来闪卡吧。"}
+          </p>
           <button onClick={onClose} className="text-sm font-semibold bg-emerald-600 text-white rounded-lg px-4 py-2">
-            关闭
+            {en ? "Close" : "关闭"}
           </button>
         </div>
       </div>
@@ -509,64 +528,86 @@ function FlashcardOverlay({ book, cards, onClose }) {
   }
 
   const firstSense = current?.senses?.[0];
+  const progress = ((index + 1) / orderedWords.length) * 100;
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl p-6 max-w-lg w-full shadow-xl">
-        <div className="flex items-center justify-between mb-4">
+    <div className="fixed inset-0 bg-[#0F1917]/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-3xl p-6 max-w-lg w-full shadow-2xl animate-fade-in-up">
+        <div className="flex items-center justify-between mb-1">
           <div>
-            <h3 className="font-bold">{book.name} · 闪卡</h3>
+            <h3 className="font-bold">{book.name} · {en ? "Flashcards" : "闪卡"}</h3>
             <p className="text-xs text-[#8B9997]">{index + 1} / {orderedWords.length}</p>
           </div>
           <button onClick={onClose} className="text-[#8B9997] hover:text-red-500 text-lg leading-none">×</button>
         </div>
 
-        <div
-          onClick={() => setFlipped((f) => !f)}
-          className="min-h-[220px] rounded-2xl border-2 border-dashed border-emerald-200 bg-[#F8FAF9] flex flex-col items-center justify-center text-center px-6 py-8 cursor-pointer select-none"
-        >
-          {!flipped ? (
-            <>
+        <div className="h-1.5 w-full bg-[#E3ECE9] rounded-full mb-4 overflow-hidden">
+          <div
+            className="h-full bg-emerald-500 rounded-full transition-all duration-300 ease-out"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+
+        <div className="[perspective:1400px] cursor-pointer select-none" onClick={() => setFlipped((f) => !f)}>
+          <div
+            className="relative min-h-[240px] rounded-2xl transition-transform duration-500 [transform-style:preserve-3d]"
+            style={{
+              transform: flipped ? "rotateY(180deg)" : "rotateY(0deg)",
+              transitionTimingFunction: "cubic-bezier(0.45, 0.05, 0.15, 1)",
+            }}
+          >
+            {/* 正面 */}
+            <div className="absolute inset-0 [backface-visibility:hidden] rounded-2xl border-2 border-dashed border-emerald-200 bg-[#F8FAF9] flex flex-col items-center justify-center text-center px-6 py-8">
               <p className="text-3xl font-bold">{current.word}</p>
               {current.pronunciation && <p className="text-sm text-[#8B9997] mt-2">{current.pronunciation}</p>}
-              <p className="text-xs text-[#8B9997] mt-6">点击卡片查看答案</p>
-            </>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-xl font-semibold text-emerald-700">{current.translation}</p>
-              {firstSense?.example && (
-                <p className="text-sm text-[#3E4E4C]">{highlightWord(firstSense.example, current.word)}</p>
-              )}
-              {firstSense?.example_translation && (
-                <p className="text-xs text-[#8B9997]">{firstSense.example_translation}</p>
-              )}
-              {firstSense?.learning_tip && <p className="text-xs text-emerald-700 pt-1">💡 {firstSense.learning_tip}</p>}
-              {current.notes && <p className="text-xs text-[#5B6B69] pt-1 border-t border-[#E3ECE9] mt-2">✏️ {current.notes}</p>}
+              <p className="text-xs text-[#8B9997] mt-6">{en ? "Tap the card to reveal the answer" : "点击卡片查看答案"}</p>
             </div>
-          )}
+
+            {/* 背面 */}
+            <div
+              className="absolute inset-0 [backface-visibility:hidden] rounded-2xl border-2 border-emerald-300 bg-emerald-50 flex flex-col items-center justify-center text-center px-6 py-8 overflow-y-auto"
+              style={{ transform: "rotateY(180deg)" }}
+            >
+              <div className="space-y-2">
+                <p className="text-xl font-semibold text-emerald-700">{current.translation}</p>
+                {firstSense?.example && (
+                  <p className="text-sm text-[#3E4E4C]">{highlightWord(firstSense.example, current.word)}</p>
+                )}
+                {firstSense?.example_translation && (
+                  <p className="text-xs text-[#8B9997]">{firstSense.example_translation}</p>
+                )}
+                {firstSense?.learning_tip && (
+                  <p className="text-xs text-emerald-700 pt-1">💡 {firstSense.learning_tip}</p>
+                )}
+                {current.notes && (
+                  <p className="text-xs text-[#5B6B69] pt-1 border-t border-[#E3ECE9] mt-2">✏️ {current.notes}</p>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="flex items-center justify-between mt-4">
           <button
             onClick={shuffle}
-            className="text-xs font-semibold text-[#5B6B69] hover:text-emerald-700 border border-[#D9E4E1] rounded-lg px-3 py-1.5"
+            className="text-xs font-semibold text-[#5B6B69] hover:text-emerald-700 border border-[#D9E4E1] rounded-lg px-3 py-1.5 hover:bg-emerald-50 transition-colors"
           >
-            🔀 打乱顺序
+            {en ? "🔀 Shuffle" : "🔀 打乱顺序"}
           </button>
           <div className="flex gap-2">
             <button
               onClick={() => goTo(index - 1)}
               disabled={index === 0}
-              className="text-xs font-semibold border border-[#D9E4E1] rounded-lg px-3 py-1.5 disabled:opacity-40"
+              className="text-xs font-semibold border border-[#D9E4E1] rounded-lg px-3 py-1.5 disabled:opacity-40 hover:bg-[#F3F6F5] transition-colors"
             >
-              ← 上一个
+              {en ? "← Prev" : "← 上一个"}
             </button>
             <button
               onClick={() => goTo(index + 1)}
               disabled={index === orderedWords.length - 1}
-              className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 disabled:opacity-40"
+              className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 disabled:opacity-40 hover:bg-emerald-700 transition-colors"
             >
-              下一个 →
+              {en ? "Next →" : "下一个 →"}
             </button>
           </div>
         </div>
@@ -596,21 +637,29 @@ function LibraryView({
   onCancelDelete,
   onPerformDelete,
   onStudy,
+  uiLang,
 }) {
+  const en = uiLang === "en";
   return (
     <section className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3 bg-white rounded-2xl p-6 shadow-sm border border-[#E3ECE9]">
+      <div className="flex items-center justify-between flex-wrap gap-3 bg-gradient-to-br from-white to-emerald-50/60 rounded-2xl p-6 shadow-sm border border-[#E3ECE9]">
         <div>
-          <h2 className="text-xl font-bold">我的单词本库</h2>
+          <h2 className="text-xl font-bold">{en ? "My Notebooks" : "我的单词本库"}</h2>
           <p className="text-sm text-[#8B9997] mt-1">
-            {books.length === 0 ? "还没有任何单词本" : `共 ${books.length} 个单词本 · ${cards.length} 个词条`}
+            {books.length === 0
+              ? en
+                ? "No notebooks yet"
+                : "还没有任何单词本"
+              : en
+              ? `${books.length} notebook${books.length === 1 ? "" : "s"} · ${cards.length} word${cards.length === 1 ? "" : "s"}`
+              : `共 ${books.length} 个单词本 · ${cards.length} 个词条`}
           </p>
         </div>
         <button
           onClick={onOpenCreateBook}
-          className="text-sm font-semibold bg-emerald-600 text-white rounded-xl px-5 py-2.5 hover:bg-emerald-700 transition-colors shadow-sm"
+          className="text-sm font-semibold bg-emerald-600 text-white rounded-xl px-5 py-2.5 hover:bg-emerald-700 transition-colors shadow-sm hover:shadow-md"
         >
-          + 新建单词本
+          {en ? "+ New notebook" : "+ 新建单词本"}
         </button>
       </div>
 
@@ -624,17 +673,17 @@ function LibraryView({
               if (e.key === "Enter") onConfirmCreateBook();
               if (e.key === "Escape") onCancelCreateBook();
             }}
-            placeholder="给新单词本起个名字，比如「日常词汇」"
+            placeholder={en ? "Name your notebook, e.g. “Everyday words”" : "给新单词本起个名字，比如「日常词汇」"}
             className="flex-1 text-sm rounded-lg border border-emerald-300 px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300"
           />
           <button
             onClick={onConfirmCreateBook}
             className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-4 py-2 hover:bg-emerald-700"
           >
-            创建
+            {en ? "Create" : "创建"}
           </button>
           <button onClick={onCancelCreateBook} className="text-xs text-[#8B9997] hover:text-red-500 px-2">
-            取消
+            {en ? "Cancel" : "取消"}
           </button>
         </div>
       )}
@@ -642,8 +691,10 @@ function LibraryView({
       {books.length === 0 ? (
         <div className="bg-white rounded-2xl p-12 shadow-sm border border-dashed border-[#D9E4E1] text-center">
           <div className="text-4xl mb-3">📚</div>
-          <p className="text-[#5B6B69] text-sm">
-            单词本是空的。点击上方"新建单词本"，或者在查词页点"加入单词本"会自动帮你创建第一个。
+          <p className="text-[#5B6B69] text-sm max-w-sm mx-auto">
+            {en
+              ? 'No notebooks yet. Click "New notebook" above, or add a word from the Search page and it’ll create your first one.'
+              : '单词本是空的。点击上方"新建单词本"，或者在查词页点"加入单词本"会自动帮你创建第一个。'}
           </p>
         </div>
       ) : (
@@ -656,7 +707,7 @@ function LibraryView({
             return (
               <div
                 key={book.id}
-                className="bg-white rounded-2xl shadow-sm border border-[#E3ECE9] overflow-hidden flex flex-col"
+                className="bg-white rounded-2xl shadow-sm hover:shadow-md transition-shadow border border-[#E3ECE9] overflow-hidden flex flex-col"
               >
                 <div className={`h-1.5 ${accent.bar}`} />
                 <div className="p-5 flex flex-col gap-3">
@@ -679,7 +730,9 @@ function LibraryView({
                     ) : (
                       <div>
                         <h3 className="font-bold text-lg leading-tight">{book.name}</h3>
-                        <p className="text-xs text-[#8B9997] mt-0.5">{book.words.length} 个单词</p>
+                        <p className="text-xs text-[#8B9997] mt-0.5">
+                          {en ? `${book.words.length} word${book.words.length === 1 ? "" : "s"}` : `${book.words.length} 个单词`}
+                        </p>
                       </div>
                     )}
 
@@ -689,31 +742,31 @@ function LibraryView({
                           <>
                             <button
                               onClick={() => onPerformDelete(book.id)}
-                              title="确认删除"
+                              title={en ? "Confirm delete" : "确认删除"}
                               className="text-xs font-semibold text-red-600 hover:text-red-700 px-1.5 py-0.5"
                             >
-                              确认删除
+                              {en ? "Confirm delete" : "确认删除"}
                             </button>
                             <button
                               onClick={onCancelDelete}
-                              title="取消"
+                              title={en ? "Cancel" : "取消"}
                               className="text-xs text-[#8B9997] hover:text-emerald-700 px-1.5 py-0.5"
                             >
-                              取消
+                              {en ? "Cancel" : "取消"}
                             </button>
                           </>
                         ) : (
                           <>
                             <button
                               onClick={() => onStartRename(book.id, book.name)}
-                              title="重命名"
+                              title={en ? "Rename" : "重命名"}
                               className="text-xs text-[#8B9997] hover:text-emerald-700 px-1.5 py-0.5"
                             >
                               ✎
                             </button>
                             <button
                               onClick={() => onRequestDelete(book.id)}
-                              title="删除单词本"
+                              title={en ? "Delete notebook" : "删除单词本"}
                               className="text-xs text-[#8B9997] hover:text-red-500 px-1.5 py-0.5"
                             >
                               🗑
@@ -730,14 +783,14 @@ function LibraryView({
                         onClick={() => onOpenBook(book.id)}
                         className="text-sm font-semibold bg-[#1B2B2A] text-white rounded-lg px-4 py-2.5 hover:bg-[#0f1918]"
                       >
-                        打开单词本 →
+                        {en ? "Open →" : "打开单词本 →"}
                       </button>
                       {book.words.length > 0 && (
                         <button
                           onClick={() => onStudy(book.id)}
                           className="text-sm font-semibold bg-white border border-[#D9E4E1] text-[#3E4E4C] rounded-lg px-4 py-2.5 hover:bg-[#F3F6F5]"
                         >
-                          🎴 闪卡
+                          {en ? "🎴 Flashcards" : "🎴 闪卡"}
                         </button>
                       )}
                     </div>
@@ -774,10 +827,11 @@ function BookDetailView({
   addLoading,
   addNotFound,
   addSuggestions,
-  learningMode,
+  uiLang,
   onStudy,
 }) {
   const [filterQuery, setFilterQuery] = useState("");
+  const en = uiLang === "en";
   const words = book.words.map((id) => cards.find((c) => c.id === id)).filter(Boolean);
   const filteredWords = filterQuery.trim()
     ? words.filter(
@@ -791,7 +845,7 @@ function BookDetailView({
     <section className="fixed inset-0 z-40 bg-[#F3F6F5] overflow-y-auto">
       <div className="max-w-2xl mx-auto p-4 md:p-8 space-y-4">
         <button onClick={onBack} className="text-sm font-semibold text-[#5B6B69] hover:text-emerald-700">
-          ← 返回单词本库
+          {en ? "← Back to notebooks" : "← 返回单词本库"}
         </button>
 
         <div className="bg-white rounded-2xl p-5 shadow-sm border border-[#E3ECE9]">
@@ -814,7 +868,9 @@ function BookDetailView({
             ) : (
               <div>
                 <h2 className="text-xl font-bold">{book.name}</h2>
-                <p className="text-xs text-[#8B9997] mt-0.5">{words.length} 个单词</p>
+                <p className="text-xs text-[#8B9997] mt-0.5">
+                  {en ? `${words.length} word${words.length === 1 ? "" : "s"}` : `${words.length} 个单词`}
+                </p>
               </div>
             )}
 
@@ -825,24 +881,24 @@ function BookDetailView({
                     onClick={() => onStudy(book.id)}
                     className="text-xs font-semibold bg-[#1B2B2A] text-white rounded-lg px-3 py-1.5 hover:bg-[#0f1918] mr-1"
                   >
-                    🎴 闪卡
+                    {en ? "🎴 Flashcards" : "🎴 闪卡"}
                   </button>
                 )}
                 {isConfirmingDelete ? (
                   <>
                     <button onClick={onPerformDelete} className="text-xs font-semibold text-red-600 px-1.5 py-0.5">
-                      确认删除
+                      {en ? "Confirm delete" : "确认删除"}
                     </button>
                     <button onClick={onCancelDelete} className="text-xs text-[#8B9997] px-1.5 py-0.5">
-                      取消
+                      {en ? "Cancel" : "取消"}
                     </button>
                   </>
                 ) : (
                   <>
-                    <button onClick={onStartRename} title="重命名" className="text-xs text-[#8B9997] hover:text-emerald-700 px-1.5 py-0.5">
+                    <button onClick={onStartRename} title={en ? "Rename" : "重命名"} className="text-xs text-[#8B9997] hover:text-emerald-700 px-1.5 py-0.5">
                       ✎
                     </button>
-                    <button onClick={onRequestDelete} title="删除单词本" className="text-xs text-[#8B9997] hover:text-red-500 px-1.5 py-0.5">
+                    <button onClick={onRequestDelete} title={en ? "Delete notebook" : "删除单词本"} className="text-xs text-[#8B9997] hover:text-red-500 px-1.5 py-0.5">
                       🗑
                     </button>
                   </>
@@ -854,14 +910,14 @@ function BookDetailView({
 
         <div className="bg-white rounded-2xl p-4 shadow-sm border border-[#E3ECE9] space-y-2">
           <p className="text-xs font-semibold text-[#5B6B69]">
-            {learningMode === "learn-zh" ? "Add a new word to this notebook" : "直接给这个本子加新词"}
+            {en ? "Add a new word to this notebook" : "直接给这个本子加新词"}
           </p>
           <div className="flex flex-col sm:flex-row gap-2">
             <input
               value={addQuery}
               onChange={(e) => onAddQueryChange(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && onAddWord()}
-              placeholder={learningMode === "learn-zh" ? "Type a word…" : "输入单词，回车直接加入本子"}
+              placeholder={en ? "Type a word, press Enter to add" : "输入单词，回车直接加入本子"}
               className="flex-1 text-sm rounded-lg border border-[#D9E4E1] px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300"
             />
             <button
@@ -869,12 +925,12 @@ function BookDetailView({
               disabled={addLoading}
               className="text-sm font-semibold bg-emerald-600 disabled:bg-emerald-300 text-white rounded-lg px-4 py-2 hover:bg-emerald-700"
             >
-              {addLoading ? "…" : "查询并加入"}
+              {addLoading ? "…" : en ? "Search & add" : "查询并加入"}
             </button>
           </div>
           {addNotFound && (
             <div className="text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded-lg px-3 py-2">
-              没有找到 "{addNotFound}"
+              {en ? `No results for "${addNotFound}"` : `没有找到 "${addNotFound}"`}
               {addSuggestions.length > 0 && (
                 <div className="flex flex-wrap gap-1.5 mt-1.5">
                   {addSuggestions.map((s) => (
@@ -896,13 +952,19 @@ function BookDetailView({
           <input
             value={filterQuery}
             onChange={(e) => setFilterQuery(e.target.value)}
-            placeholder={learningMode === "learn-zh" ? "Search words in this notebook" : "在这个本子已有的词里搜索"}
+            placeholder={en ? "Search words in this notebook" : "在这个本子已有的词里搜索"}
             className="w-full text-sm rounded-lg border border-[#D9E4E1] px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300"
           />
 
           {filteredWords.length === 0 ? (
             <p className="text-xs text-[#8B9997] py-4 text-center">
-              {words.length === 0 ? "这个本子还是空的，上面加个词试试" : "没有匹配的词"}
+              {words.length === 0
+                ? en
+                  ? "This notebook is empty — add a word above"
+                  : "这个本子还是空的，上面加个词试试"
+                : en
+                ? "No matching words"
+                : "没有匹配的词"}
             </p>
           ) : (
             <div className="space-y-2">
@@ -914,6 +976,7 @@ function BookDetailView({
                   bookId={book.id}
                   onRemove={onRemoveWord}
                   onUpdateNotes={onUpdateNotes}
+                  uiLang={uiLang}
                 />
               ))}
             </div>
@@ -932,6 +995,8 @@ export default function WordLearningApp() {
   const [password, setPassword] = useState("");
   const [authMessage, setAuthMessage] = useState("");
 
+  const [activeTab, setActiveTab] = useState("search"); // "search": 查词页 | "library": 单词本库独立页面
+  const [uiLang, setUiLang] = useState(() => localStorage.getItem("ui-lang") || "zh"); // 主界面文案语言，和"学习模式"（学习内容语言）是两回事
   const [learningMode, setLearningMode] = useState("learn-en"); // "learn-en": 母语中文学英语 | "learn-zh": 母语英文学中文
   const [direction, setDirection] = useState("en->zh");
   const [query, setQuery] = useState("");
@@ -971,6 +1036,10 @@ export default function WordLearningApp() {
     localStorage.setItem("word-settings", JSON.stringify(settings));
   }, [settings]);
 
+  useEffect(() => {
+    localStorage.setItem("ui-lang", uiLang);
+  }, [uiLang]);
+
   // 真正的账号系统：登录状态由 Supabase 维护（浏览器里存的是一个安全令牌，不是密码）。
   // 打开网页时先问 Supabase "现在是谁登录着"，之后只要登录状态变化（登录/登出/token刷新）就同步更新。
   useEffect(() => {
@@ -989,7 +1058,7 @@ export default function WordLearningApp() {
   const handleAuth = async (e) => {
     e.preventDefault();
     if (!email || !password) {
-      setAuthMessage("邮箱和密码都不能为空");
+      setAuthMessage(uiLang === "en" ? "Email and password are required" : "邮箱和密码都不能为空");
       return;
     }
     setAuthMessage("");
@@ -1000,7 +1069,11 @@ export default function WordLearningApp() {
         setAuthMessage(error.message);
         return;
       }
-      setAuthMessage("注册成功！如果开启了邮箱验证，请去邮箱点确认链接后再登录。");
+      setAuthMessage(
+        uiLang === "en"
+          ? "Sign-up successful! If email verification is on, check your inbox before logging in."
+          : "注册成功！如果开启了邮箱验证，请去邮箱点确认链接后再登录。"
+      );
       return;
     }
 
@@ -1008,7 +1081,7 @@ export default function WordLearningApp() {
     if (error) {
       setAuthMessage(error.message);
     } else {
-      setAuthMessage("登录成功");
+      setAuthMessage(uiLang === "en" ? "Signed in successfully" : "登录成功");
     }
   };
 
@@ -1189,62 +1262,83 @@ export default function WordLearningApp() {
   const sense = selectedWord?.senses?.[selectedSenseIndex];
 
   return (
-    <div className="min-h-screen w-full bg-[#F3F6F5] text-[#1B2B2A] p-4 md:p-8" style={{ fontFamily: "'Segoe UI', system-ui, sans-serif" }}>
+    <div
+      className="min-h-screen w-full bg-gradient-to-b from-[#EAF6F0] via-[#F3F6F5] to-[#F3F6F5] text-[#1B2B2A] p-4 md:p-8"
+      style={{ fontFamily: "'Segoe UI', system-ui, sans-serif" }}
+    >
       <div className="max-w-6xl mx-auto space-y-6">
 
         {/* Header */}
-        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white rounded-2xl p-6 shadow-sm border border-[#E3ECE9]">
+        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-gradient-to-br from-white to-emerald-50/60 rounded-2xl p-6 shadow-sm border border-[#E3ECE9]">
           <div>
             <p className="text-xs tracking-widest text-emerald-600 font-semibold uppercase">Translate Psychic</p>
             <h1 className="text-2xl md:text-3xl font-bold mt-1">
-              {learningMode === "learn-zh" ? "Learn Chinese" : "背单词助手"}
+              {uiLang === "en"
+                ? learningMode === "learn-zh"
+                  ? "Learn Chinese"
+                  : "Vocab Buddy"
+                : learningMode === "learn-zh"
+                ? "学中文"
+                : "背单词助手"}
             </h1>
             <p className="text-sm text-[#5B6B69] mt-2 max-w-md">
-              {learningMode === "learn-zh"
-                ? "Type a word in English, Pinyin, or Chinese to see its meaning, pronunciation, and example sentences."
+              {uiLang === "en"
+                ? learningMode === "learn-zh"
+                  ? "Type a word in English, Pinyin, or Chinese to see its meaning, pronunciation, and example sentences."
+                  : "Type a word to see its translation, examples, and tips, and organize it into notebooks."
+                : learningMode === "learn-zh"
+                ? "输入英文、拼音或中文即可查看含义、拼音与例句。"
                 : "输入单词即可查看翻译、例句与学习提示，并整理进多个独立单词本。"}
             </p>
           </div>
           <div className="w-full md:w-72">
             {authLoading ? (
-              <div className="bg-[#F3F6F5] rounded-xl p-4 text-sm text-[#8B9997]">正在检查登录状态…</div>
+              <div className="bg-[#F3F6F5] rounded-xl p-4 text-sm text-[#8B9997]">
+                {uiLang === "en" ? "Checking sign-in status…" : "正在检查登录状态…"}
+              </div>
             ) : sessionUser ? (
               <div className="bg-[#F3F6F5] rounded-xl p-4 text-sm">
                 <strong className="block">{sessionUser.email}</strong>
-                <p className="text-[#5B6B69] mt-1">已登录</p>
+                <p className="text-[#5B6B69] mt-1">{uiLang === "en" ? "Signed in" : "已登录"}</p>
                 <button
                   onClick={handleLogout}
                   className="mt-3 text-xs font-medium text-emerald-700 hover:underline"
                 >
-                  退出登录
+                  {uiLang === "en" ? "Sign out" : "退出登录"}
                 </button>
               </div>
             ) : (
               <form onSubmit={handleAuth} className="bg-[#F3F6F5] rounded-xl p-4 space-y-2">
-                <h2 className="text-sm font-semibold">{authMode === "login" ? "登录" : "注册"}</h2>
+                <h2 className="text-sm font-semibold">
+                  {authMode === "login" ? (uiLang === "en" ? "Log in" : "登录") : uiLang === "en" ? "Sign up" : "注册"}
+                </h2>
                 <input
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="邮箱"
+                  placeholder={uiLang === "en" ? "Email" : "邮箱"}
                   className="w-full text-sm rounded-lg border border-[#D9E4E1] px-3 py-1.5 outline-none focus:ring-2 focus:ring-emerald-300"
                 />
                 <input
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   type="password"
-                  placeholder="密码"
+                  placeholder={uiLang === "en" ? "Password" : "密码"}
                   className="w-full text-sm rounded-lg border border-[#D9E4E1] px-3 py-1.5 outline-none focus:ring-2 focus:ring-emerald-300"
                 />
                 <div className="flex items-center justify-between pt-1">
                   <button type="submit" className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 hover:bg-emerald-700">
-                    {authMode === "login" ? "登录" : "注册"}
+                    {authMode === "login" ? (uiLang === "en" ? "Log in" : "登录") : uiLang === "en" ? "Sign up" : "注册"}
                   </button>
                   <button
                     type="button"
                     onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}
                     className="text-xs text-[#5B6B69] hover:underline"
                   >
-                    切换为{authMode === "login" ? "注册" : "登录"}
+                    {uiLang === "en"
+                      ? authMode === "login"
+                        ? "Switch to sign up"
+                        : "Switch to log in"
+                      : `切换为${authMode === "login" ? "注册" : "登录"}`}
                   </button>
                 </div>
                 {authMessage && <p className="text-xs text-emerald-700">{authMessage}</p>}
@@ -1253,37 +1347,77 @@ export default function WordLearningApp() {
           </div>
         </header>
 
-        {/* 导航条：学习模式 + 页面切换 */}
+        {/* 导航条：页面切换 + 学习模式 + 界面语言 */}
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-white rounded-2xl p-3 shadow-sm border border-[#E3ECE9]">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-xs font-semibold text-[#8B9997] pl-1">学习模式</span>
+            <span className="text-xs font-semibold text-[#8B9997] pl-1">{uiLang === "en" ? "Page" : "页面"}</span>
+            <div className="flex gap-1 bg-[#F3F6F5] rounded-full p-1">
+              <button
+                onClick={() => {
+                  setActiveTab("search");
+                  setOpenBookId(null);
+                }}
+                className={`text-xs font-semibold rounded-full px-3 py-1.5 transition-colors ${
+                  activeTab === "search" && !openBookId
+                    ? "bg-emerald-600 text-white shadow-sm"
+                    : "text-[#5B6B69] hover:bg-emerald-50"
+                }`}
+              >
+                {uiLang === "en" ? "🔍 Search" : "🔍 查词"}
+              </button>
+              <button
+                onClick={() => setActiveTab("library")}
+                className={`text-xs font-semibold rounded-full px-3 py-1.5 transition-colors ${
+                  activeTab === "library" || openBookId
+                    ? "bg-emerald-600 text-white shadow-sm"
+                    : "text-[#5B6B69] hover:bg-emerald-50"
+                }`}
+              >
+                {uiLang === "en" ? "📚 Library" : "📚 单词本"}
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-semibold text-[#8B9997] pl-1">{uiLang === "en" ? "Mode" : "学习模式"}</span>
             <div className="flex gap-1 bg-[#F3F6F5] rounded-full p-1">
               <button
                 onClick={() => setLearningMode("learn-en")}
                 className={`text-xs font-semibold rounded-full px-3 py-1.5 transition-colors ${
-                  learningMode === "learn-en" ? "bg-emerald-600 text-white" : "text-[#5B6B69] hover:bg-emerald-50"
+                  learningMode === "learn-en" ? "bg-emerald-600 text-white shadow-sm" : "text-[#5B6B69] hover:bg-emerald-50"
                 }`}
               >
-                学英语 · 中文母语
+                {uiLang === "en" ? "Learn English (from Chinese)" : "学英语 · 中文母语"}
               </button>
               <button
                 onClick={() => setLearningMode("learn-zh")}
                 className={`text-xs font-semibold rounded-full px-3 py-1.5 transition-colors ${
-                  learningMode === "learn-zh" ? "bg-emerald-600 text-white" : "text-[#5B6B69] hover:bg-emerald-50"
+                  learningMode === "learn-zh" ? "bg-emerald-600 text-white shadow-sm" : "text-[#5B6B69] hover:bg-emerald-50"
                 }`}
               >
-                Learn Chinese · English speaker
+                {uiLang === "en" ? "Learn Chinese (from English)" : "学中文 · 英文母语"}
               </button>
             </div>
           </div>
-          <div className="flex items-center gap-2 sm:ml-auto text-xs">
-            <a href="#search-section" className="text-[#5B6B69] hover:text-emerald-700 font-semibold">
-              ↓ 查词
-            </a>
-            <span className="text-[#D9E4E1]">|</span>
-            <a href="#library-section" className="text-[#5B6B69] hover:text-emerald-700 font-semibold">
-              ↓ 单词本库
-            </a>
+          <div className="flex items-center gap-2 sm:ml-auto flex-wrap">
+            <span className="text-xs font-semibold text-[#8B9997] pl-1">{uiLang === "en" ? "Language" : "界面语言"}</span>
+            <div className="flex gap-1 bg-[#F3F6F5] rounded-full p-1">
+              <button
+                onClick={() => setUiLang("zh")}
+                className={`text-xs font-semibold rounded-full px-3 py-1.5 transition-colors ${
+                  uiLang === "zh" ? "bg-emerald-600 text-white shadow-sm" : "text-[#5B6B69] hover:bg-emerald-50"
+                }`}
+              >
+                中文
+              </button>
+              <button
+                onClick={() => setUiLang("en")}
+                className={`text-xs font-semibold rounded-full px-3 py-1.5 transition-colors ${
+                  uiLang === "en" ? "bg-emerald-600 text-white shadow-sm" : "text-[#5B6B69] hover:bg-emerald-50"
+                }`}
+              >
+                EN
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1311,24 +1445,25 @@ export default function WordLearningApp() {
                 addLoading={bookAddLoading}
                 addNotFound={bookAddNotFound}
                 addSuggestions={bookAddSuggestions}
-                learningMode={learningMode}
+                uiLang={uiLang}
                 onStudy={setStudyBookId}
               />
           ) : (
             <>
+              {activeTab === "search" && (
               <section id="search-section" className="max-w-2xl mx-auto bg-white rounded-2xl p-6 shadow-sm border border-[#E3ECE9] space-y-4">
               <div className="flex items-center justify-between">
-                <h2 className="font-semibold text-lg">{learningMode === "learn-zh" ? "Search" : "查词"}</h2>
+                <h2 className="font-semibold text-lg">{uiLang === "en" ? "Search" : "查词"}</h2>
                 <button
                   onClick={() => handleSearch()}
                   disabled={isLoading}
                   className="text-sm font-semibold bg-emerald-600 disabled:bg-emerald-300 text-white rounded-lg px-4 py-2 hover:bg-emerald-700 transition-colors"
                 >
                   {isLoading
-                    ? learningMode === "learn-zh"
-                      ? "Loading…"
+                    ? uiLang === "en"
+                      ? "Searching…"
                       : "生成中…"
-                    : learningMode === "learn-zh"
+                    : uiLang === "en"
                     ? "Search"
                     : "查词并生成"}
                 </button>
@@ -1339,7 +1474,15 @@ export default function WordLearningApp() {
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                  placeholder={learningMode === "learn-zh" ? "Type English, Pinyin, or 中文" : "输入单词，例如 apple"}
+                  placeholder={
+                    learningMode === "learn-zh"
+                      ? uiLang === "en"
+                        ? "Type English, Pinyin, or 中文"
+                        : "输入英文、拼音或中文"
+                      : uiLang === "en"
+                      ? "Type a word, e.g. apple"
+                      : "输入单词，例如 apple"
+                  }
                   className="flex-1 text-sm rounded-lg border border-[#D9E4E1] px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-300"
                 />
                 {learningMode === "learn-en" && (
@@ -1356,11 +1499,11 @@ export default function WordLearningApp() {
 
               <div>
                 <h3 className="text-xs font-semibold text-[#5B6B69] mb-2">
-                  {learningMode === "learn-zh" ? "Recent searches" : "最近搜索"}
+                  {uiLang === "en" ? "Recent searches" : "最近搜索"}
                 </h3>
                 {recentSearches.length === 0 ? (
                   <p className="text-xs text-[#8B9997]">
-                    {learningMode === "learn-zh" ? "No recent searches yet." : "最近没有搜索记录。"}
+                    {uiLang === "en" ? "No recent searches yet." : "最近没有搜索记录。"}
                   </p>
                 ) : (
                   <div className="flex flex-wrap gap-2">
@@ -1383,8 +1526,8 @@ export default function WordLearningApp() {
                             e.stopPropagation();
                             setRecentSearches((cur) => cur.filter((i) => i !== item));
                           }}
-                          aria-label={`删除 ${item}`}
-                          title="删除"
+                          aria-label={uiLang === "en" ? `Remove ${item}` : `删除 ${item}`}
+                          title={uiLang === "en" ? "Remove" : "删除"}
                           className="text-[#8B9997] hover:text-red-500 text-xs leading-none px-0.5"
                         >
                           ×
@@ -1397,7 +1540,7 @@ export default function WordLearningApp() {
 
               {spellSuggestions.length > 0 && (
                 <div className="text-sm bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3">
-                  没有找到 "{notFoundWord}"，您是否要搜索：
+                  {uiLang === "en" ? `No results for "${notFoundWord}" — did you mean:` : `没有找到 "${notFoundWord}"，您是否要搜索：`}
                   <div className="flex flex-wrap gap-2 mt-2">
                     {spellSuggestions.map((s) => (
                       <button
@@ -1416,13 +1559,19 @@ export default function WordLearningApp() {
               )}
               {spellSuggestions.length === 0 && notFoundWord && (
                 <div className="text-sm bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3">
-                  没有找到 "{notFoundWord}"{learningMode === "learn-en" ? "，也没有类似的拼写建议，换个词试试？" : "，换个词试试？"}
+                  {uiLang === "en"
+                    ? `No results for "${notFoundWord}"${
+                        learningMode === "learn-en" ? ", and no similar spellings either. Try another word?" : ". Try another word?"
+                      }`
+                    : `没有找到 "${notFoundWord}"${learningMode === "learn-en" ? "，也没有类似的拼写建议，换个词试试？" : "，换个词试试？"}`}
                 </div>
               )}
 
               {maybeSuggestions.length > 0 && selectedWord && (
                 <div className="text-sm bg-sky-50 border border-sky-200 text-sky-800 rounded-xl px-4 py-3">
-                  "{selectedWord.word}" 不算常见，你是不是想找：
+                  {uiLang === "en"
+                    ? `"${selectedWord.word}" isn't very common — did you mean:`
+                    : `"${selectedWord.word}" 不算常见，你是不是想找：`}
                   <div className="flex flex-wrap gap-2 mt-2">
                     {maybeSuggestions.map((s) => (
                       <button
@@ -1440,14 +1589,14 @@ export default function WordLearningApp() {
                       onClick={() => setMaybeSuggestions([])}
                       className="text-xs font-semibold text-sky-700 underline px-1"
                     >
-                      不，就是要查 "{selectedWord.word}"
+                      {uiLang === "en" ? `No, I meant "${selectedWord.word}"` : `不，就是要查 "${selectedWord.word}"`}
                     </button>
                   </div>
                 </div>
               )}
 
-              <div className="bg-[#F8FAF9] rounded-xl p-4 border border-[#E3ECE9]">
-                {selectedWord ? (
+              {selectedWord && (
+                <div className="bg-[#F8FAF9] rounded-xl p-4 border border-[#E3ECE9]">
                   <>
                     <div className="flex items-start justify-between">
                       <div>
@@ -1455,7 +1604,7 @@ export default function WordLearningApp() {
                           {selectedWord.word}
                           <button
                             onClick={() => speakWord(selectedWord.mode === "learn-zh" ? selectedWord.word : selectedWord.word)}
-                            title="朗读"
+                            title={uiLang === "en" ? "Listen" : "朗读"}
                             className="text-base hover:scale-110 transition-transform"
                           >
                             🔊
@@ -1484,7 +1633,7 @@ export default function WordLearningApp() {
                                 : "bg-white text-[#5B6B69] border-[#D9E4E1]"
                             }`}
                           >
-                            {s.part_of_speech || "释义"} {i + 1}
+                            {s.part_of_speech || (uiLang === "en" ? "Sense" : "释义")} {i + 1}
                           </button>
                         ))}
                       </div>
@@ -1529,19 +1678,19 @@ export default function WordLearningApp() {
                       </div>
                     ) : (
                       <p className="text-sm text-[#8B9997] mt-3">
-                        {learningMode === "learn-zh" ? "No definition available." : "该词暂无可用释义。"}
+                        {uiLang === "en" ? "No definition available." : "该词暂无可用释义。"}
                       </p>
                     )}
 
                     <div className="mt-3">
                       <p className="text-xs font-semibold text-[#5B6B69] mb-1">
-                        ✏️ {learningMode === "learn-zh" ? "My notes" : "我的笔记（想记什么都可以）"}
+                        ✏️ {uiLang === "en" ? "My notes" : "我的笔记（想记什么都可以）"}
                       </p>
                       <textarea
                         value={selectedWord.notes || ""}
                         onChange={(e) => updateCardNotes(selectedWord.id, e.target.value)}
                         placeholder={
-                          learningMode === "learn-zh"
+                          uiLang === "en"
                             ? "Write anything you want to remember…"
                             : "比如：容易搞混的词、老师举的例子、自己编的联想……"
                         }
@@ -1565,11 +1714,17 @@ export default function WordLearningApp() {
                         onClick={() => addWordToBook(selectedWord.id)}
                         className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 hover:bg-emerald-700"
                       >
-                        {books.length === 0 ? "新建单词本并加入" : "加入单词本"}
+                        {uiLang === "en"
+                          ? books.length === 0
+                            ? "New notebook & add"
+                            : "Add to notebook"
+                          : books.length === 0
+                          ? "新建单词本并加入"
+                          : "加入单词本"}
                       </button>
                       {books.length > 0 && (
                         <button onClick={() => openCreateBook()} className="text-xs text-emerald-700 hover:underline">
-                          + 新建
+                          {uiLang === "en" ? "+ New" : "+ 新建"}
                         </button>
                       )}
                     </div>
@@ -1584,31 +1739,27 @@ export default function WordLearningApp() {
                             if (e.key === "Enter") confirmCreateBook();
                             if (e.key === "Escape") cancelCreateBook();
                           }}
-                          placeholder="给新单词本起个名字"
+                          placeholder={uiLang === "en" ? "Name your notebook" : "给新单词本起个名字"}
                           className="flex-1 text-sm rounded-lg border border-emerald-300 px-2 py-1.5 outline-none focus:ring-2 focus:ring-emerald-300"
                         />
                         <button
                           onClick={confirmCreateBook}
                           className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 hover:bg-emerald-700"
                         >
-                          创建
+                          {uiLang === "en" ? "Create" : "创建"}
                         </button>
                         <button onClick={cancelCreateBook} className="text-xs text-[#8B9997] hover:text-red-500 px-2">
-                          取消
+                          {uiLang === "en" ? "Cancel" : "取消"}
                         </button>
                       </div>
                     )}
                   </>
-                ) : (
-                  <p className="text-sm text-[#8B9997]">
-                    {learningMode === "learn-zh" ? "Type a word to get started." : "请输入一个单词"}
-                  </p>
-                )}
-              </div>
+                </div>
+              )}
 
               <div>
                 <h3 className="text-xs font-semibold text-[#5B6B69] mb-2">
-                  {learningMode === "learn-zh" ? "Display options" : "显示偏好"}
+                  {uiLang === "en" ? "Display options" : "显示偏好"}
                 </h3>
                 <div className="grid grid-cols-2 gap-2">
                   {Object.entries(defaultSettings).map(([key]) => (
@@ -1619,14 +1770,16 @@ export default function WordLearningApp() {
                         onChange={() => handleSettingChange(key)}
                         className="accent-emerald-600"
                       />
-                      {settingLabels[key]}
+                      {uiLang === "en" ? settingLabelsEn[key] : settingLabels[key]}
                     </label>
                   ))}
                 </div>
               </div>
               </section>
+              )}
 
-              <section id="library-section">
+              {activeTab === "library" && (
+              <section id="library-section" className="max-w-5xl mx-auto">
                 <LibraryView
                   books={books}
                   cards={cards}
@@ -1653,8 +1806,10 @@ export default function WordLearningApp() {
                   onCancelDelete={cancelDeleteBook}
                   onPerformDelete={performDeleteBook}
                   onStudy={setStudyBookId}
+                  uiLang={uiLang}
                 />
               </section>
+              )}
             </>
           )}
         </main>
@@ -1664,6 +1819,7 @@ export default function WordLearningApp() {
             book={books.find((b) => b.id === studyBookId)}
             cards={cards}
             onClose={() => setStudyBookId(null)}
+            uiLang={uiLang}
           />
         )}
 
