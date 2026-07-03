@@ -39,12 +39,44 @@ vercel dev
 6. 同时检查一下 **Settings → Deployment Protection**，确认 "Vercel Authentication" 是关闭的——开着的话所有访客都要先登录 Vercel 才能看到网站。
 7. 打开 Vercel 分配的网址，测试查词功能是否正常。
 
+## 宣传首页的数据统计
+
+首页会展示"多少人在用 / 累计查词次数 / 收藏单词数"，这些数字来自 Supabase 里的一张 `app_events` 表。没配置的话首页就不显示这个区块，不影响其他功能。
+
+1. 打开你的 Supabase 项目 → 左侧菜单 **SQL Editor** → New query，粘贴下面这段并运行：
+
+   ```sql
+   create table if not exists public.app_events (
+     id bigint generated always as identity primary key,
+     event_type text not null,
+     user_id uuid references auth.users(id) on delete set null,
+     created_at timestamptz not null default now()
+   );
+
+   alter table public.app_events enable row level security;
+
+   create policy "Allow insert for everyone" on public.app_events
+     for insert
+     to anon, authenticated
+     with check (true);
+   ```
+
+   这张表只允许"插入"，不允许任何人直接"读取"——真实数据不会被人从前端扒走，首页看到的数字是后端用 service role key 单独汇总出来的。
+
+2. 去 Supabase 项目 → **Settings → API**，找到 **service_role** 这个 key（跟登录用的 anon key 不是同一个，这个绝对不能写进前端代码，只能配进 Vercel 的环境变量）。
+3. 去 Vercel 项目 → **Settings → Environment Variables**，添加：
+   - Name: `SUPABASE_SERVICE_ROLE_KEY`
+   - Value: 你复制的 service_role key
+4. 添加完去 **Deployments** 对最新一次部署点 "Redeploy"。
+5. 重新部署完，回到网站首页，正常使用一下查词/登录/加入单词本，刷新几次首页应该就能看到统计数字了。
+
 ## 项目结构
 
 ```
-src/App.jsx        主应用（查词、单词本、闪卡全部在这个文件里）
+src/App.jsx        主应用（宣传首页、查词、单词本、闪卡全部在这个文件里）
 src/utils/auth.js  密码哈希（仅用于演示登录，非真正安全的账号系统）
 api/ai.js          Vercel Serverless Function，代理智谱 GLM-4-Flash，Key 只在服务器端
+api/stats.js       Vercel Serverless Function，用 service role key 汇总首页展示的统计数字
 ```
 
 ## 已知限制（如实说明）

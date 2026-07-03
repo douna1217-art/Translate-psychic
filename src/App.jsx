@@ -1098,6 +1098,95 @@ function BookDetailView({
   );
 }
 
+// 宣传首页：只在第一次进入时自动出现，之后可以从导航栏"首页"按钮再回来看。
+// 主打卖点是"查完单词直接存进单词本"，不用再切换 App 单独记录。
+function LandingPage({ uiLang, onEnter, stats, statsLoading }) {
+  const en = uiLang === "en";
+  const hasStats = !statsLoading && stats && (stats.totalUsers > 0 || stats.totalSearches > 0 || stats.totalWords > 0);
+
+  const features = [
+    {
+      icon: "🔍",
+      title: en ? "Search & save in one step" : "查词即整理",
+      desc: en
+        ? "Every word you look up can go straight into a notebook — no more copying into a separate notes app."
+        : "查到的每个词都能直接加入单词本，不用再另外打开备忘录抄一遍。",
+    },
+    {
+      icon: "📚",
+      title: en ? "Multiple notebooks" : "多个单词本分类",
+      desc: en
+        ? "Organize by course, topic, or however you like, and switch between them anytime."
+        : "按课程、主题自由分类整理，想找哪本词随时切换。",
+    },
+    {
+      icon: "🎴",
+      title: en ? "Flashcard review" : "闪卡复习",
+      desc: en
+        ? "A natural flip animation makes reviewing feel a lot less like a chore."
+        : "自然的翻卡动画，复习起来没那么枯燥，随时随地巩固记忆。",
+    },
+  ];
+
+  return (
+    <div className="min-h-screen w-full bg-gradient-to-b from-[#EAF6F0] via-[#F3F6F5] to-[#F3F6F5] flex items-center justify-center p-4 md:p-8">
+      <div className="max-w-3xl w-full space-y-10 text-center py-10">
+        <div>
+          <p className="text-xs tracking-widest text-emerald-600 font-semibold uppercase">Translate Psychic</p>
+          <h1 className="text-3xl md:text-5xl font-bold mt-3 leading-tight">
+            {en ? "Search a word, save it instantly." : "查完单词，一键存进单词本"}
+          </h1>
+          <p className="text-base md:text-lg text-[#5B6B69] mt-4 max-w-xl mx-auto">
+            {en
+              ? "No more switching between a dictionary and a notes app just to keep track of what you've looked up."
+              : "不用再一边查词典一边打开备忘录抄写——查完单词直接加进单词本，告别“查完就忘记整理”的麻烦。"}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-left">
+          {features.map((f) => (
+            <div key={f.title} className="bg-white rounded-2xl p-5 shadow-sm border border-[#E3ECE9]">
+              <div className="text-2xl mb-2">{f.icon}</div>
+              <h3 className="font-bold">{f.title}</h3>
+              <p className="text-sm text-[#5B6B69] mt-1">{f.desc}</p>
+            </div>
+          ))}
+        </div>
+
+        {hasStats && (
+          <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3">
+            {stats.totalUsers > 0 && (
+              <div>
+                <p className="text-2xl font-bold text-emerald-700">{stats.totalUsers}</p>
+                <p className="text-xs text-[#8B9997]">{en ? "students using it" : "位同学在用"}</p>
+              </div>
+            )}
+            {stats.totalSearches > 0 && (
+              <div>
+                <p className="text-2xl font-bold text-emerald-700">{stats.totalSearches}</p>
+                <p className="text-xs text-[#8B9997]">{en ? "searches so far" : "次累计查词"}</p>
+              </div>
+            )}
+            {stats.totalWords > 0 && (
+              <div>
+                <p className="text-2xl font-bold text-emerald-700">{stats.totalWords}</p>
+                <p className="text-xs text-[#8B9997]">{en ? "words saved" : "个单词被收藏"}</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        <button
+          onClick={onEnter}
+          className="text-base font-semibold bg-emerald-600 text-white rounded-xl px-8 py-3 hover:bg-emerald-700 transition-colors shadow-sm hover:shadow-md"
+        >
+          {en ? "Get started →" : "开始使用 →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function WordLearningApp() {
   const [sessionUser, setSessionUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -1106,6 +1195,10 @@ export default function WordLearningApp() {
   const [password, setPassword] = useState("");
   const [authMessage, setAuthMessage] = useState("");
 
+  // 只有第一次进入才自动显示宣传首页；之后可以通过导航栏"首页"按钮随时再回去看
+  const [showLanding, setShowLanding] = useState(() => !localStorage.getItem("has-visited-landing"));
+  const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("search"); // "search": 查词页 | "library": 单词本库独立页面
   const [uiLang, setUiLang] = useState(() => localStorage.getItem("ui-lang") || "zh"); // 主界面文案语言，和"学习模式"（学习内容语言）是两回事
   const [learningMode, setLearningMode] = useState("learn-en"); // "learn-en": 母语中文学英语 | "learn-zh": 母语英文学中文
@@ -1168,6 +1261,25 @@ export default function WordLearningApp() {
     localStorage.setItem("ui-lang", uiLang);
   }, [uiLang]);
 
+  // 宣传首页上的使用数据，只有首页真正显示的时候才去请求，不用每次打开 App 都调用
+  useEffect(() => {
+    if (!showLanding) return;
+    let cancelled = false;
+    setStatsLoading(true);
+    fetch("/api/stats")
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled) setStats(data);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setStatsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showLanding]);
+
   // 真正的账号系统：登录状态由 Supabase 维护（浏览器里存的是一个安全令牌，不是密码）。
   // 打开网页时先问 Supabase "现在是谁登录着"，之后只要登录状态变化（登录/登出/token刷新）就同步更新。
   useEffect(() => {
@@ -1183,6 +1295,18 @@ export default function WordLearningApp() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  // 埋点：往 Supabase 的 app_events 表插入一条记录，用来在宣传首页展示"有多少人在用"这类数据。
+  // 纯粹是统计用的，失败了也不影响正常使用，所以不 await、不抛错
+  const logEvent = (eventType) => {
+    supabase
+      .from("app_events")
+      .insert({ event_type: eventType, user_id: sessionUser?.id || null })
+      .then(
+        () => {},
+        () => {}
+      );
+  };
+
   const handleAuth = async (e) => {
     e.preventDefault();
     if (!email || !password) {
@@ -1197,6 +1321,7 @@ export default function WordLearningApp() {
         setAuthMessage(error.message);
         return;
       }
+      logEvent("signup");
       setAuthMessage(
         uiLang === "en"
           ? "Sign-up successful! If email verification is on, check your inbox before logging in."
@@ -1225,6 +1350,7 @@ export default function WordLearningApp() {
     if (result.type !== "card") {
       return { ok: false, word: result.word || word, suggestions: result.suggestions || [] };
     }
+    logEvent("search");
     const rawCard = { ...result.card, mode: learningMode };
     let finalCard = rawCard;
     setCards((cur) => {
@@ -1323,13 +1449,13 @@ export default function WordLearningApp() {
   };
 
   const addToBook = (bookId, cardId) => {
-    setBooks((cur) =>
-      cur.map((book) =>
-        book.id === bookId
-          ? { ...book, words: book.words.includes(cardId) ? book.words : [...book.words, cardId] }
-          : book
-      )
-    );
+    setBooks((cur) => {
+      const book = cur.find((b) => b.id === bookId);
+      if (book && !book.words.includes(cardId)) logEvent("word_saved");
+      return cur.map((b) =>
+        b.id === bookId ? { ...b, words: b.words.includes(cardId) ? b.words : [...b.words, cardId] } : b
+      );
+    });
   };
 
   const addWordToBook = (cardId) => {
@@ -1388,6 +1514,15 @@ export default function WordLearningApp() {
   const handleSettingChange = (key) => setSettings((cur) => ({ ...cur, [key]: !cur[key] }));
 
   const sense = selectedWord?.senses?.[selectedSenseIndex];
+
+  const enterApp = () => {
+    localStorage.setItem("has-visited-landing", "1");
+    setShowLanding(false);
+  };
+
+  if (showLanding) {
+    return <LandingPage uiLang={uiLang} onEnter={enterApp} stats={stats} statsLoading={statsLoading} />;
+  }
 
   return (
     <div
@@ -1475,8 +1610,14 @@ export default function WordLearningApp() {
           </div>
         </header>
 
-        {/* 导航条：页面切换 + 学习模式 + 界面语言 */}
+        {/* 导航条：首页 + 页面切换 + 学习模式 + 界面语言 */}
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-white rounded-2xl p-3 shadow-sm border border-[#E3ECE9]">
+          <button
+            onClick={() => setShowLanding(true)}
+            className="self-start text-xs font-semibold rounded-full px-3 py-1.5 text-[#5B6B69] hover:bg-emerald-50 hover:text-emerald-700 transition-colors border border-[#D9E4E1] shrink-0"
+          >
+            {uiLang === "en" ? "🏠 Home" : "🏠 首页"}
+          </button>
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-semibold text-[#8B9997] pl-1">{uiLang === "en" ? "Page" : "页面"}</span>
             <div className="flex gap-1 bg-[#F3F6F5] rounded-full p-1">
