@@ -6,6 +6,8 @@ const defaultSettings = {
   showPronunciation: true,
   showExample: true,
   showTip: true,
+  showForms: true,
+  showSynonyms: false,
 };
 
 const settingLabels = {
@@ -13,6 +15,8 @@ const settingLabels = {
   showPronunciation: "显示音标",
   showExample: "显示例句",
   showTip: "显示学习提示",
+  showForms: "显示词形变化",
+  showSynonyms: "显示近义词",
 };
 
 const settingLabelsEn = {
@@ -20,6 +24,8 @@ const settingLabelsEn = {
   showPronunciation: "Show pronunciation",
   showExample: "Show examples",
   showTip: "Show learning tips",
+  showForms: "Show word forms",
+  showSynonyms: "Show synonyms",
 };
 
 function normalizeSearchTerm(term) {
@@ -149,6 +155,18 @@ async function fetchSpellingSuggestions(word) {
   }
 }
 
+// ③ Datamuse 近义词 API：免费、不需要 key，跟 AI 是否可用完全无关，所以稳定不会失效
+async function fetchSynonyms(word) {
+  try {
+    const res = await fetch(`https://api.datamuse.com/words?rel_syn=${encodeURIComponent(word)}&max=8`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.map((item) => item.word);
+  } catch (error) {
+    return [];
+  }
+}
+
 // 从词典条目里整理出常见释义（每个词性最多取2条，最多8条，保证完整又不过量）
 function extractMeaningsFromDict(dictEntry) {
   const meanings = dictEntry.meanings || [];
@@ -180,8 +198,15 @@ ${listText}
 只输出 JSON，不要多余文字或 markdown：
 {
   "translation": "整个单词最常用的中文翻译（一两个词）",
+  "other_forms": [ { "label": "这个词形的中文说法，比如 过去式/过去分词/现在分词/第三人称单数/复数/比较级/最高级", "form": "对应的英文词形" } ]（只列出这个词真实适用的词形变化，没有规律变化就返回空数组，不要瞎编）,
   "items": [
-    { "chinese_meaning": "简短中文词义", "definition_translation": "该条释义的中文翻译", "example_translation": "对应例句的中文翻译（没有例句则留空）", "learning_tip": "生动有趣、朗朗上口的学习小贴士，25字以内。优先用和这个词相关的英语谚语、俗语、习语或经典搭配（比如 apple 可以用「An apple a day keeps the doctor away，一天一苹果，医生远离我」这种），配上对应的中文谚语或有趣的联想；如果实在没有相关谚语/习语，再退而用词根词缀、谐音或场景联想来帮助记忆" }
+    {
+      "chinese_meaning": "简短中文词义",
+      "definition_translation": "该条释义的中文翻译",
+      "example": "一个简单、常见、贴近日常生活的英文例句，展示这个词义的用法。如果词典给的原例句已经足够常见简单就可以保留或轻微调整，如果原例句生僻/复杂/没有，就换成更口语化、日常场景的句子，但要保证词性和词义用法准确",
+      "example_translation": "对应例句的中文翻译",
+      "learning_tip": "生动有趣、朗朗上口的学习小贴士，25字以内。优先用和这个词相关的英语谚语、俗语、习语或经典搭配（比如 apple 可以用「An apple a day keeps the doctor away，一天一苹果，医生远离我」这种），配上对应的中文谚语或有趣的联想；如果实在没有相关谚语/习语，再退而用词根词缀、谐音或场景联想来帮助记忆"
+    }
   ]
 }
 items 数组长度必须与上面编号数量一致，按顺序对应，不要合并或省略。`;
@@ -249,7 +274,8 @@ function buildCardFromDict(englishWord, dictEntry, meanings, translationResult) 
   const senses = meanings.map((m, i) => ({
     part_of_speech: m.part_of_speech,
     english_definition: m.english_definition,
-    example: m.example,
+    // AI 会尽量把生僻的原例句换成更常见、更贴近日常的句子；免费兜底翻译没这个能力，就还是用词典原句
+    example: items[i]?.example || m.example,
     chinese_meaning: items[i]?.chinese_meaning || "",
     definition_translation: items[i]?.definition_translation || "",
     example_translation: items[i]?.example_translation || "",
@@ -260,6 +286,7 @@ function buildCardFromDict(englishWord, dictEntry, meanings, translationResult) 
     word: englishWord,
     translation: translationResult.translation || senses[0]?.chinese_meaning || "",
     pronunciation: phonetic,
+    otherForms: translationResult.other_forms || [],
     senses,
     notes: "",
     createdAt: Date.now(),
@@ -282,8 +309,9 @@ async function generateCardWithAIOnly(word, direction) {
   "word": "${direction === "zh->en" ? "对应的英文单词" : "原单词"}",
   "translation": "最常用的中文翻译（一两个词）",
   "pronunciation": "音标",
+  "other_forms": [ { "label": "这个词形的中文说法，比如 过去式/过去分词/现在分词/第三人称单数/复数/比较级/最高级", "form": "对应的英文词形" } ]（只列出真实适用的词形变化，没有就返回空数组，不要瞎编）,
   "senses": [
-    { "part_of_speech": "词性", "english_definition": "简短英文释义", "chinese_meaning": "简短中文词义", "definition_translation": "释义的中文翻译", "example": "英文例句", "example_translation": "例句中文翻译", "learning_tip": "生动有趣的学习小贴士，25字以内，优先用相关的英语谚语/习语（配中文翻译），没有的话再用词根或联想记忆" }
+    { "part_of_speech": "词性", "english_definition": "简短英文释义", "chinese_meaning": "简短中文词义", "definition_translation": "释义的中文翻译", "example": "简单常见、贴近日常生活的英文例句，避免生僻或过于书面的说法", "example_translation": "例句中文翻译", "learning_tip": "生动有趣的学习小贴士，25字以内，优先用相关的英语谚语/习语（配中文翻译），没有的话再用词根或联想记忆" }
   ]
 }`;
 
@@ -299,6 +327,7 @@ async function generateCardWithAIOnly(word, direction) {
     word: parsed.word || word,
     translation: parsed.translation || "",
     pronunciation: parsed.pronunciation || "",
+    otherForms: parsed.other_forms || [],
     senses: parsed.senses || [],
     notes: "",
     createdAt: Date.now(),
@@ -339,7 +368,7 @@ Output ONLY JSON, no extra text or markdown:
     {
       "part_of_speech": "noun / verb / adjective / etc. (in English)",
       "definition": "a concise English definition of this sense",
-      "example": "a Chinese example sentence using the word",
+      "example": "a simple, common, everyday Chinese example sentence using the word (avoid obscure or overly formal/literary phrasing)",
       "example_gloss": "English translation of that example sentence",
       "learning_tip": "a fun, memorable tip under 25 words — prefer a related Chinese proverb/idiom (chengyu) or cultural fun fact if one fits naturally, otherwise fall back to a character/radical breakdown or mnemonic"
     }
@@ -1100,11 +1129,28 @@ export default function WordLearningApp() {
   });
   const [settings, setSettings] = useState(() => {
     const stored = localStorage.getItem("word-settings");
-    return stored ? JSON.parse(stored) : defaultSettings;
+    // 跟默认值合并一下，这样以后新加的显示偏好，老用户本地存的旧设置也不会漏掉
+    return stored ? { ...defaultSettings, ...JSON.parse(stored) } : defaultSettings;
   });
   const [targetBookId, setTargetBookId] = useState("");
+  const [synonyms, setSynonyms] = useState([]);
 
   useEffect(() => setSelectedSenseIndex(0), [selectedWord?.word]);
+
+  // 近义词来自 Datamuse（免费、不需要 key），只对学英语模式下的单词有意义
+  useEffect(() => {
+    if (!selectedWord || selectedWord.mode === "learn-zh") {
+      setSynonyms([]);
+      return;
+    }
+    let cancelled = false;
+    fetchSynonyms(selectedWord.word).then((list) => {
+      if (!cancelled) setSynonyms(list);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedWord?.word, selectedWord?.mode]);
 
   useEffect(() => {
     localStorage.setItem("word-cards", JSON.stringify(cards));
@@ -1703,6 +1749,19 @@ export default function WordLearningApp() {
                       )}
                     </div>
 
+                    {settings.showForms && selectedWord.otherForms?.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-3">
+                        {selectedWord.otherForms.map((f, i) => (
+                          <span
+                            key={i}
+                            className="text-xs bg-[#F3F6F5] text-[#5B6B69] rounded-full px-3 py-1 border border-[#E3ECE9]"
+                          >
+                            {f.label} <span className="font-semibold text-[#3E4E4C]">{f.form}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
                     {selectedWord.senses?.length > 0 && (
                       <div className="flex flex-wrap gap-1.5 mt-3">
                         {selectedWord.senses.map((s, i) => (
@@ -1762,6 +1821,28 @@ export default function WordLearningApp() {
                       <p className="text-sm text-[#8B9997] mt-3">
                         {uiLang === "en" ? "No definition available." : "该词暂无可用释义。"}
                       </p>
+                    )}
+
+                    {settings.showSynonyms && synonyms.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-[#E3ECE9]">
+                        <p className="text-xs font-semibold text-[#5B6B69] mb-1.5">
+                          {uiLang === "en" ? "Synonyms" : "近义词"}
+                        </p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {synonyms.map((s) => (
+                            <button
+                              key={s}
+                              onClick={() => {
+                                setQuery(s);
+                                handleSearch(s);
+                              }}
+                              className="text-xs font-semibold bg-white border border-[#D9E4E1] text-[#5B6B69] rounded-full px-3 py-1 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-300 transition-colors"
+                            >
+                              {s}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     )}
 
                     <div className="mt-3">
