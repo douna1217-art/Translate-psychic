@@ -18,30 +18,33 @@ npm install
 npm run dev
 ```
 
-⚠️ 查词功能依赖 `/api/gemini` 这个后端接口，本地用 `npm run dev` 是访问不到的（Vite 自己的 dev server 不会跑 `/api` 目录）。本地要测试查词，需要用 Vercel CLI：
+⚠️ 查词功能依赖 `/api/ai` 这个后端接口，本地用 `npm run dev` 是访问不到的（Vite 自己的 dev server 不会跑 `/api` 目录）。本地要测试查词，需要用 Vercel CLI：
 
 ```bash
 npm install -g vercel
 vercel dev
 ```
 
+即使 `/api/ai` 打不通，查词也不会完全失效——免费词典 API 查不到翻译时会自动降级用免费翻译服务兜底，只是没有 AI 生成的学习小贴士。
+
 ## 部署到 Vercel
 
-1. 在 [ai.google.dev](https://ai.google.dev/) 或 Google AI Studio 申请一个免费的 Gemini API Key。
+1. 去 [bigmodel.cn](https://bigmodel.cn) （智谱开放平台）注册账号、完成实名认证，领取免费的 GLM-4-Flash API Key（用这个而不是 Gemini，是因为免费额度宽松很多，而且国内访问稳定，不用担心网络问题）。
 2. 把这个项目推到 GitHub（一个新仓库即可）。
 3. 去 [vercel.com](https://vercel.com) 用 GitHub 账号登录，点 "Add New… → Project"，选择这个仓库，直接点 Deploy（Vercel 会自动识别这是 Vite 项目）。
 4. 部署完成后，去项目的 **Settings → Environment Variables**，添加：
-   - Name: `GEMINI_API_KEY`
-   - Value: 你的 Gemini Key
+   - Name: `ZHIPU_API_KEY`
+   - Value: 你的智谱 Key
 5. 加完环境变量后，去 **Deployments** 里对最新一次部署点 "Redeploy"（环境变量只在重新部署后生效）。
-6. 打开 Vercel 分配的网址，测试查词功能是否正常。
+6. 同时检查一下 **Settings → Deployment Protection**，确认 "Vercel Authentication" 是关闭的——开着的话所有访客都要先登录 Vercel 才能看到网站。
+7. 打开 Vercel 分配的网址，测试查词功能是否正常。
 
 ## 项目结构
 
 ```
 src/App.jsx        主应用（查词、单词本、闪卡全部在这个文件里）
 src/utils/auth.js  密码哈希（仅用于演示登录，非真正安全的账号系统）
-api/gemini.js      Vercel Serverless Function，代理 Gemini API，Key 只在服务器端
+api/ai.js          Vercel Serverless Function，代理智谱 GLM-4-Flash，Key 只在服务器端
 ```
 
 ## 已知限制（如实说明）

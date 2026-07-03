@@ -58,16 +58,16 @@ function extractJson(text) {
   return JSON.parse(cleaned);
 }
 
-// 所有 AI 调用统一走后端的 /api/gemini 代理（见项目根目录 api/gemini.js）。
-// 真正的 Gemini API Key 只存在服务器端环境变量里，浏览器拿不到，避免被偷走。
+// 所有 AI 调用统一走后端的 /api/ai 代理（见项目根目录 api/ai.js，目前接的是智谱 GLM-4-Flash）。
+// 真正的 API Key 只存在服务器端环境变量里，浏览器拿不到，避免被偷走。
 async function callAI(prompt) {
-  const response = await fetch("/api/gemini", {
+  const response = await fetch("/api/ai", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt }),
   });
   const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = data.choices?.[0]?.message?.content;
   if (!text) {
     const errMsg = data.error || "AI 服务暂时不可用，请稍后再试";
     throw new Error(typeof errMsg === "string" ? errMsg : JSON.stringify(errMsg));
