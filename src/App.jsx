@@ -60,19 +60,28 @@ function extractJson(text) {
 
 // 所有 AI 调用统一走后端的 /api/ai 代理（见项目根目录 api/ai.js，目前接的是智谱 GLM-4-Flash）。
 // 真正的 API Key 只存在服务器端环境变量里，浏览器拿不到，避免被偷走。
+// 加了个超时：AI 服务打不通或者很慢的时候，最多等 7 秒就放弃转去用免费翻译兜底，
+// 不然查词会被卡住很久才降级，体感会很慢
 async function callAI(prompt) {
-  const response = await fetch("/api/ai", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
-  });
-  const data = await response.json();
-  const text = data.choices?.[0]?.message?.content;
-  if (!text) {
-    const errMsg = data.error || "AI 服务暂时不可用，请稍后再试";
-    throw new Error(typeof errMsg === "string" ? errMsg : JSON.stringify(errMsg));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7000);
+  try {
+    const response = await fetch("/api/ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+      signal: controller.signal,
+    });
+    const data = await response.json();
+    const text = data.choices?.[0]?.message?.content;
+    if (!text) {
+      const errMsg = data.error || "AI 服务暂时不可用，请稍后再试";
+      throw new Error(typeof errMsg === "string" ? errMsg : JSON.stringify(errMsg));
+    }
+    return text;
+  } finally {
+    clearTimeout(timeout);
   }
-  return text;
 }
 
 // 把例句中出现的目标单词/词组高亮显示。英文按词边界+简单变形匹配，中文按原样子串匹配（中文没有单词边界）
@@ -198,18 +207,21 @@ async function translateTextFree(text, langpair) {
 }
 
 // AI 翻译不通时的降级：改用免费翻译服务逐条翻译。质量不如 AI（没有学习小贴士、词义更生硬），
-// 但至少能让查到的词典内容正常显示中文，而不是直接报"找不到"
+// 但至少能让查到的词典内容正常显示中文，而不是直接报"找不到"。
+// 单词本身的翻译和每条释义/例句的翻译互不依赖，全部一次性并发发出去，不用排队等，能省不少时间
 async function translateMeaningsWithFreeFallback(word, meanings) {
-  const translation = await translateTextFree(word, "en|zh-CN");
-  const items = await Promise.all(
+  const translationPromise = translateTextFree(word, "en|zh-CN");
+  const itemsPromise = Promise.all(
     meanings.map(async (m) => {
       const [definition_translation, example_translation] = await Promise.all([
         translateTextFree(m.english_definition, "en|zh-CN"),
         m.example ? translateTextFree(m.example, "en|zh-CN") : Promise.resolve(""),
       ]);
-      return { chinese_meaning: translation, definition_translation, example_translation, learning_tip: "" };
+      return { definition_translation, example_translation };
     })
   );
+  const [translation, rawItems] = await Promise.all([translationPromise, itemsPromise]);
+  const items = rawItems.map((item) => ({ chinese_meaning: translation, ...item, learning_tip: "" }));
   return { translation, items };
 }
 
@@ -425,19 +437,21 @@ async function lookupWord(rawWord) {
 
     if (dictResult.status === "ok") {
       const meanings = extractMeaningsFromDict(dictResult.entry);
+      // 顺手看看是不是一个生僻/低频词——这个检查跟翻译互不依赖，提前并发发出去，
+      // 不用等翻译做完才开始，省一趟串行的等待
+      const freqCheckPromise = checkWordFrequencyAndAlternatives(englishWord);
       let translationResult;
       try {
         translationResult = await translateMeaningsWithAI(englishWord, meanings);
       } catch (error) {
-        // Gemini 打不通时，别把整个查词判成"找不到"——改用免费翻译服务兜底，
+        // AI 打不通时，别把整个查词判成"找不到"——改用免费翻译服务兜底，
         // 让词典内容照样能显示出来
         translationResult = await translateMeaningsWithFreeFallback(englishWord, meanings);
       }
       const card = buildCardFromDict(englishWord, dictResult.entry, meanings, translationResult);
       wordCardCache.set(cacheKey, card);
 
-      // 即使词典里查到了，也顺手看看是不是一个生僻/低频词，是的话带上"你是不是想找"的软提示
-      const freqCheck = await checkWordFrequencyAndAlternatives(englishWord);
+      const freqCheck = await freqCheckPromise;
       return { type: "card", card, maybeSuggestions: freqCheck.lowConfidence ? freqCheck.alternatives : [] };
     }
 
