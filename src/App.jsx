@@ -70,7 +70,7 @@ function extractJson(text) {
 // 不然查词会被卡住很久才降级，体感会很慢。
 // （词形变化功能上线后 AI 单次要生成的内容变多了，实测正常响应经常要 15~18 秒，
 // 超时定得太短会导致几乎每次都提前放弃、掉去免费翻译兜底，例句和学习提示全部丢失）
-async function callAI(prompt) {
+async function callAIOnce(prompt) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 20000);
   try {
@@ -89,6 +89,16 @@ async function callAI(prompt) {
     return text;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+// 查词现在会并发发出多个 AI 请求（词形变化、释义各一个），偶尔会有某一个请求单独卡住或超时——
+// 失败了自动重试一次再放弃，避免因为一次偶发的慢请求就把整份内容都丢掉、误判成"生成失败"
+async function callAI(prompt) {
+  try {
+    return await callAIOnce(prompt);
+  } catch (error) {
+    return await callAIOnce(prompt);
   }
 }
 
@@ -559,6 +569,12 @@ async function lookupWord(rawWord) {
     if (aiCard) {
       wordCardCache.set(cacheKey, aiCard);
       return { type: "card", card: aiCard };
+    }
+
+    if (spelling.status === "ok" && spelling.exactMatch) {
+      // Datamuse 已经确认这就是个拼写正确的真词，只是 AI 这次没能生成出内容（服务异常/超时）——
+      // 不能说"没找到"再配一堆不相关的拼写建议（会误导成"这个词拼错了"），如实告知生成失败
+      return { type: "notfound", word: englishWord, suggestions: [], aiFailed: true };
     }
 
     // AI 也生成不出来：Datamuse 正常的话就用它的结果，打不通才轮到 AI 给拼写建议
@@ -1499,6 +1515,7 @@ export default function WordLearningApp() {
   const [spellSuggestions, setSpellSuggestions] = useState([]);
   const [maybeSuggestions, setMaybeSuggestions] = useState([]);
   const [notFoundWord, setNotFoundWord] = useState("");
+  const [notFoundAiFailed, setNotFoundAiFailed] = useState(false);
 
   const [cards, setCards] = useState(() => {
     const stored = localStorage.getItem("word-cards");
@@ -1702,7 +1719,7 @@ export default function WordLearningApp() {
   const searchAndUpsertCard = async (word) => {
     const result = learningMode === "learn-zh" ? await lookupChineseWord(word) : await lookupWord(word);
     if (result.type !== "card") {
-      return { ok: false, word: result.word || word, suggestions: result.suggestions || [] };
+      return { ok: false, word: result.word || word, suggestions: result.suggestions || [], aiFailed: result.aiFailed || false };
     }
     logEvent("search");
     recordStudyDay();
@@ -1730,6 +1747,7 @@ export default function WordLearningApp() {
     setIsLoading(true);
     setSpellSuggestions([]);
     setMaybeSuggestions([]);
+    setNotFoundAiFailed(false);
 
     const result = await searchAndUpsertCard(word);
 
@@ -1747,6 +1765,7 @@ export default function WordLearningApp() {
     } else {
       setNotFoundWord(result.word);
       setSpellSuggestions(result.suggestions);
+      setNotFoundAiFailed(result.aiFailed || false);
     }
 
     setIsLoading(false);
@@ -2192,7 +2211,14 @@ export default function WordLearningApp() {
                   </div>
                 </div>
               )}
-              {spellSuggestions.length === 0 && notFoundWord && (
+              {spellSuggestions.length === 0 && notFoundWord && notFoundAiFailed && (
+                <div className="text-sm bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3">
+                  {uiLang === "en"
+                    ? `"${notFoundWord}" looks correct, but the AI didn't respond in time. Please try again.`
+                    : `"${notFoundWord}" 拼写没问题，但 AI 这次没能及时生成内容，请重新查一次试试。`}
+                </div>
+              )}
+              {spellSuggestions.length === 0 && notFoundWord && !notFoundAiFailed && (
                 <div className="text-sm bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3">
                   {uiLang === "en"
                     ? `No results for "${notFoundWord}"${
