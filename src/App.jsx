@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./utils/supabaseClient";
 
 const defaultSettings = {
@@ -587,7 +587,7 @@ function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes, uiLan
   );
 }
 
-function FlashcardOverlay({ book, cards, onClose, uiLang }) {
+function FlashcardOverlay({ book, cards, onClose, uiLang, onReview }) {
   const en = uiLang === "en";
   const words = useMemo(
     () => book.words.map((id) => cards.find((c) => c.id === id)).filter(Boolean),
@@ -659,7 +659,15 @@ function FlashcardOverlay({ book, cards, onClose, uiLang }) {
           />
         </div>
 
-        <div className="[perspective:1400px] cursor-pointer select-none" onClick={() => setFlipped((f) => !f)}>
+        <div
+          className="[perspective:1400px] cursor-pointer select-none"
+          onClick={() =>
+            setFlipped((f) => {
+              if (!f) onReview?.(); // 翻到答案那一面才算"看了一遍"，跟统计口径对上
+              return !f;
+            })
+          }
+        >
           <div
             className="relative min-h-[240px] rounded-2xl transition-transform duration-500 [transform-style:preserve-3d]"
             style={{
@@ -1102,29 +1110,36 @@ function BookDetailView({
 // 主打卖点是"查完单词直接存进单词本"，不用再切换 App 单独记录。
 function LandingPage({ uiLang, onEnter, stats, statsLoading }) {
   const en = uiLang === "en";
-  const hasStats = !statsLoading && stats && (stats.totalUsers > 0 || stats.totalSearches > 0 || stats.totalWords > 0);
+  const hasStats =
+    !statsLoading &&
+    stats &&
+    (stats.totalUsers > 0 ||
+      stats.totalSearches > 0 ||
+      stats.totalWords > 0 ||
+      stats.totalBooks > 0 ||
+      stats.totalReviews > 0);
 
   const features = [
     {
       icon: "🔍",
       title: en ? "Search & save in one step" : "查词即整理",
       desc: en
-        ? "Every word you look up can go straight into a notebook — no more copying into a separate notes app."
-        : "查到的每个词都能直接加入单词本，不用再另外打开备忘录抄一遍。",
+        ? "Every word you look up can be saved straight into a notebook — no more switching apps just to write it down."
+        : "查到的每个词，一键就能存进单词本——不用再切来切去，另外找地方抄写。",
     },
     {
       icon: "📚",
       title: en ? "Multiple notebooks" : "多个单词本分类",
       desc: en
-        ? "Organize by course, topic, or however you like, and switch between them anytime."
-        : "按课程、主题自由分类整理，想找哪本词随时切换。",
+        ? "Organize by course, unit, or topic. Even dozens of notebooks stay easy to navigate."
+        : "按课程、单元、话题自由分类，就算建了几十个单词本，也能一眼找到想要的那本。",
     },
     {
       icon: "🎴",
-      title: en ? "Flashcard review" : "闪卡复习",
+      title: en ? "Flashcards that feel real" : "闪卡复习，像翻真卡片",
       desc: en
-        ? "A natural flip animation makes reviewing feel a lot less like a chore."
-        : "自然的翻卡动画，复习起来没那么枯燥，随时随地巩固记忆。",
+        ? "Tap to flip and reveal the answer — the animation feels just like flipping a real card. Perfect for a quick review while waiting for the bus."
+        : "轻轻一点就翻面看答案，翻面动画做得跟真卡片一样自然；等车、课间的几分钟，也能把单词本过一遍。",
     },
   ];
 
@@ -1173,6 +1188,18 @@ function LandingPage({ uiLang, onEnter, stats, statsLoading }) {
                 <p className="text-xs text-[#8B9997]">{en ? "words saved" : "个单词被收藏"}</p>
               </div>
             )}
+            {stats.totalBooks > 0 && (
+              <div>
+                <p className="text-2xl font-bold text-emerald-700">{stats.totalBooks}</p>
+                <p className="text-xs text-[#8B9997]">{en ? "notebooks created" : "个单词本被创建"}</p>
+              </div>
+            )}
+            {stats.totalReviews > 0 && (
+              <div>
+                <p className="text-2xl font-bold text-emerald-700">{stats.totalReviews}</p>
+                <p className="text-xs text-[#8B9997]">{en ? "flashcard reviews" : "次闪卡复习"}</p>
+              </div>
+            )}
           </div>
         )}
 
@@ -1185,6 +1212,72 @@ function LandingPage({ uiLang, onEnter, stats, statsLoading }) {
       </div>
     </div>
   );
+}
+
+// ================= 登录账号的云端数据同步 =================
+// 没登录时：单词本和单词卡完全是本地 localStorage，跟以前一样。
+// 登录后：改成以 Supabase 数据库里的数据为准，本地状态只是一份缓存/离线兜底。
+// 卡片/单词本的 id 沿用前端一直在用的方案（Date.now() 数字 / book-时间戳 字符串），
+// 这样"整表删掉重新写入"是安全、幂等的操作，不会导致 id 漂移、单词本里的引用失效。
+
+function cardToDbRow(card, userId) {
+  return {
+    id: card.id,
+    user_id: userId,
+    word: card.word,
+    translation: card.translation || "",
+    pronunciation: card.pronunciation || "",
+    mode: card.mode,
+    senses: card.senses || [],
+    other_forms: card.otherForms || [],
+    notes: card.notes || "",
+  };
+}
+
+function cardFromDbRow(row) {
+  return {
+    id: row.id,
+    word: row.word,
+    translation: row.translation || "",
+    pronunciation: row.pronunciation || "",
+    mode: row.mode,
+    senses: row.senses || [],
+    otherForms: row.other_forms || [],
+    notes: row.notes || "",
+    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+  };
+}
+
+function bookToDbRow(book, userId) {
+  return { id: book.id, user_id: userId, name: book.name, word_ids: book.words || [] };
+}
+
+function bookFromDbRow(row) {
+  return { id: row.id, name: row.name, words: row.word_ids || [] };
+}
+
+// 同步失败（比如表还没建好、网络问题）不应该影响本地正常使用，所以这里全部吞掉错误，
+// 本地 state + localStorage 永远是可用的兜底
+async function syncCardsToSupabase(userId, cards) {
+  try {
+    await supabase.from("word_cards").delete().eq("user_id", userId);
+    if (cards.length > 0) {
+      await supabase.from("word_cards").insert(cards.map((c) => cardToDbRow(c, userId)));
+    }
+  } catch (error) {
+    // 忽略，本地数据不受影响
+  }
+}
+
+async function syncBooksToSupabase(userId, books) {
+  try {
+    await supabase.from("word_books").delete().eq("user_id", userId);
+    if (books.length > 0) {
+      await supabase.from("word_books").insert(books.map((b) => bookToDbRow(b, userId)));
+    }
+  } catch (error) {
+    // 忽略，本地数据不受影响
+  }
 }
 
 export default function WordLearningApp() {
@@ -1245,13 +1338,51 @@ export default function WordLearningApp() {
     };
   }, [selectedWord?.word, selectedWord?.mode]);
 
+  // 登录时把 cards/books 同步写到 Supabase，做了防抖——不然打字改笔记这种连续操作会疯狂触发写库
+  const cardsSyncTimer = useRef(null);
+  const booksSyncTimer = useRef(null);
+
   useEffect(() => {
     localStorage.setItem("word-cards", JSON.stringify(cards));
-  }, [cards]);
+    if (!sessionUser) return;
+    clearTimeout(cardsSyncTimer.current);
+    cardsSyncTimer.current = setTimeout(() => syncCardsToSupabase(sessionUser.id, cards), 1200);
+  }, [cards, sessionUser]);
 
   useEffect(() => {
     localStorage.setItem("word-books", JSON.stringify(books));
-  }, [books]);
+    if (!sessionUser) return;
+    clearTimeout(booksSyncTimer.current);
+    booksSyncTimer.current = setTimeout(() => syncBooksToSupabase(sessionUser.id, books), 1200);
+  }, [books, sessionUser]);
+
+  // 登录后：账号里已经有数据就用账号的（换设备也能看到一样的单词本）；
+  // 账号是空的但本地已经攒了一些内容，就把本地内容"认领"到账号上，不会凭空丢失
+  useEffect(() => {
+    if (!sessionUser) return;
+    let cancelled = false;
+    (async () => {
+      const [cardsRes, booksRes] = await Promise.all([
+        supabase.from("word_cards").select("*").eq("user_id", sessionUser.id),
+        supabase.from("word_books").select("*").eq("user_id", sessionUser.id),
+      ]);
+      if (cancelled) return;
+      const remoteCards = cardsRes.data || [];
+      const remoteBooks = booksRes.data || [];
+
+      if (remoteCards.length === 0 && remoteBooks.length === 0) {
+        if (cards.length > 0) syncCardsToSupabase(sessionUser.id, cards);
+        if (books.length > 0) syncBooksToSupabase(sessionUser.id, books);
+        return;
+      }
+
+      setCards(remoteCards.map(cardFromDbRow));
+      setBooks(remoteBooks.map(bookFromDbRow));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionUser?.id]);
 
   useEffect(() => {
     localStorage.setItem("word-settings", JSON.stringify(settings));
@@ -1444,6 +1575,7 @@ export default function WordLearningApp() {
     if (!name) return;
     const newBook = { id: `book-${Date.now()}`, name, words: pendingCardId ? [pendingCardId] : [] };
     setBooks((cur) => [...cur, newBook]);
+    logEvent("book_created");
     setTargetBookId(newBook.id);
     cancelCreateBook();
   };
@@ -2124,6 +2256,7 @@ export default function WordLearningApp() {
             cards={cards}
             onClose={() => setStudyBookId(null)}
             uiLang={uiLang}
+            onReview={() => logEvent("flashcard_reviewed")}
           />
         )}
 
