@@ -587,7 +587,7 @@ function WordAccordionRow({ card, accent, bookId, onRemove, onUpdateNotes, uiLan
   );
 }
 
-function FlashcardOverlay({ book, cards, onClose, uiLang, onReview }) {
+function FlashcardOverlay({ book, cards, onClose, uiLang, onReview, onRate }) {
   const en = uiLang === "en";
   const words = useMemo(
     () => book.words.map((id) => cards.find((c) => c.id === id)).filter(Boolean),
@@ -621,6 +621,13 @@ function FlashcardOverlay({ book, cards, onClose, uiLang, onReview }) {
     setOrder(shuffled);
     setIndex(0);
     setFlipped(false);
+  };
+
+  // 借鉴 Anki：翻开答案之后不是简单点"下一个"，而是自己评一下记不记得，
+  // 决定这张卡下次该多久之后再出现
+  const rate = (rating) => {
+    onRate?.(current.id, rating);
+    goTo(index + 1);
   };
 
   if (words.length === 0) {
@@ -706,29 +713,59 @@ function FlashcardOverlay({ book, cards, onClose, uiLang, onReview }) {
           </div>
         </div>
 
-        <div className="flex items-center justify-between mt-4">
+        <div className="flex items-center justify-between mt-4 gap-2 flex-wrap">
           <button
             onClick={shuffle}
-            className="text-xs font-semibold text-[#5B6B69] hover:text-emerald-700 border border-[#D9E4E1] rounded-lg px-3 py-1.5 hover:bg-emerald-50 transition-colors"
+            className="text-xs font-semibold text-[#5B6B69] hover:text-emerald-700 border border-[#D9E4E1] rounded-lg px-3 py-1.5 hover:bg-emerald-50 transition-colors shrink-0"
           >
             {en ? "🔀 Shuffle" : "🔀 打乱顺序"}
           </button>
-          <div className="flex gap-2">
-            <button
-              onClick={() => goTo(index - 1)}
-              disabled={index === 0}
-              className="text-xs font-semibold border border-[#D9E4E1] rounded-lg px-3 py-1.5 disabled:opacity-40 hover:bg-[#F3F6F5] transition-colors"
-            >
-              {en ? "← Prev" : "← 上一个"}
-            </button>
-            <button
-              onClick={() => goTo(index + 1)}
-              disabled={index === orderedWords.length - 1}
-              className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 disabled:opacity-40 hover:bg-emerald-700 transition-colors"
-            >
-              {en ? "Next →" : "下一个 →"}
-            </button>
-          </div>
+
+          {flipped ? (
+            <div className="flex gap-1.5 flex-wrap justify-end">
+              <button
+                onClick={() => rate("again")}
+                className="text-xs font-semibold bg-red-50 text-red-700 border border-red-200 rounded-lg px-2.5 py-1.5 hover:bg-red-100 transition-colors"
+              >
+                {en ? "Again" : "没记住"}
+              </button>
+              <button
+                onClick={() => rate("hard")}
+                className="text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200 rounded-lg px-2.5 py-1.5 hover:bg-amber-100 transition-colors"
+              >
+                {en ? "Hard" : "有点难"}
+              </button>
+              <button
+                onClick={() => rate("good")}
+                className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-2.5 py-1.5 hover:bg-emerald-700 transition-colors"
+              >
+                {en ? "Good" : "记得"}
+              </button>
+              <button
+                onClick={() => rate("easy")}
+                className="text-xs font-semibold bg-sky-50 text-sky-700 border border-sky-200 rounded-lg px-2.5 py-1.5 hover:bg-sky-100 transition-colors"
+              >
+                {en ? "Easy" : "很简单"}
+              </button>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <button
+                onClick={() => goTo(index - 1)}
+                disabled={index === 0}
+                className="text-xs font-semibold border border-[#D9E4E1] rounded-lg px-3 py-1.5 disabled:opacity-40 hover:bg-[#F3F6F5] transition-colors"
+              >
+                {en ? "← Prev" : "← 上一个"}
+              </button>
+              <button
+                onClick={() => goTo(index + 1)}
+                disabled={index === orderedWords.length - 1}
+                className="text-xs font-semibold bg-emerald-600 text-white rounded-lg px-3 py-1.5 disabled:opacity-40 hover:bg-emerald-700 transition-colors"
+              >
+                {en ? "Next →" : "下一个 →"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -822,6 +859,10 @@ function LibraryView({
             const accent = bookAccents[index % bookAccents.length];
             const isRenaming = renamingBookId === book.id;
             const isConfirmingDelete = confirmDeleteBookId === book.id;
+            const dueCount = book.words
+              .map((id) => cards.find((c) => c.id === id))
+              .filter(Boolean)
+              .filter(isDueForReview).length;
 
             return (
               <div
@@ -849,8 +890,13 @@ function LibraryView({
                     ) : (
                       <div>
                         <h3 className="font-bold text-lg leading-tight">{book.name}</h3>
-                        <p className="text-xs text-[#8B9997] mt-0.5">
-                          {en ? `${book.words.length} word${book.words.length === 1 ? "" : "s"}` : `${book.words.length} 个单词`}
+                        <p className="text-xs text-[#8B9997] mt-0.5 flex items-center gap-1.5 flex-wrap">
+                          <span>{en ? `${book.words.length} word${book.words.length === 1 ? "" : "s"}` : `${book.words.length} 个单词`}</span>
+                          {dueCount > 0 && (
+                            <span className="text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-1.5 py-0.5 text-[10px] font-semibold">
+                              {en ? `${dueCount} due` : `${dueCount} 个待复习`}
+                            </span>
+                          )}
                         </p>
                       </div>
                     )}
@@ -1231,6 +1277,7 @@ function cardToDbRow(card, userId) {
     senses: card.senses || [],
     other_forms: card.otherForms || [],
     notes: card.notes || "",
+    srs: card.srs || null,
   };
 }
 
@@ -1244,6 +1291,7 @@ function cardFromDbRow(row) {
     senses: row.senses || [],
     otherForms: row.other_forms || [],
     notes: row.notes || "",
+    srs: row.srs || null,
     createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
   };
 }
@@ -1278,6 +1326,91 @@ async function syncBooksToSupabase(userId, books) {
   } catch (error) {
     // 忽略，本地数据不受影响
   }
+}
+
+// ================= 连续学习天数 =================
+// 逻辑很像 Duolingo 的 streak：今天已经算过就不重复加，昨天学过今天接着学就 +1，
+// 中间断了一天以上就从 1 重新开始。以本地时区的日期为准，不是严格 24 小时。
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function computeStreakUpdate(prev, today) {
+  if (!prev?.lastDate) return { current: 1, longest: 1, lastDate: today };
+  if (prev.lastDate === today) return prev;
+
+  const y = new Date(today);
+  y.setDate(y.getDate() - 1);
+  const yesterday = `${y.getFullYear()}-${String(y.getMonth() + 1).padStart(2, "0")}-${String(y.getDate()).padStart(2, "0")}`;
+
+  if (prev.lastDate === yesterday) {
+    const current = prev.current + 1;
+    return { current, longest: Math.max(prev.longest, current), lastDate: today };
+  }
+  return { current: 1, longest: Math.max(prev.longest, 1), lastDate: today };
+}
+
+// 登录/换设备时，本地和云端的连续天数可能不一致，取"最近学习日期更新的那份"作为基准
+function mergeStreaks(a, b) {
+  if (!a?.lastDate) return b || { current: 0, longest: 0, lastDate: "" };
+  if (!b?.lastDate) return a;
+  if (a.lastDate === b.lastDate) {
+    return { current: Math.max(a.current, b.current), longest: Math.max(a.longest, b.longest), lastDate: a.lastDate };
+  }
+  return a.lastDate > b.lastDate ? a : b;
+}
+
+async function syncStreakToSupabase(userId, streak) {
+  try {
+    await supabase.from("study_streaks").upsert({
+      user_id: userId,
+      current_streak: streak.current,
+      longest_streak: streak.longest,
+      last_study_date: streak.lastDate || null,
+    });
+  } catch (error) {
+    // 忽略，本地数据不受影响
+  }
+}
+
+// ================= 间隔重复（借鉴 Anki 的简化版 SM-2） =================
+// 每张卡片自己记一份 srs 状态：interval（下次复习间隔，单位天）、ease（简单度，越高间隔涨得越快）、
+// reps（连续答对次数）、due（下次该复习的时间戳）。新卡片没有 srs，视为"从没学过，现在就该学"。
+// 评分对应 Anki 经典的四个按钮：
+//   again：完全不会——重置进度，明天再见
+//   hard： 有点吃力——间隔涨得比较慢
+//   good： 记得——按 ease 正常增长间隔
+//   easy： 很简单——间隔涨得更快，顺便把 ease 提高
+function nextSrsState(prevSrs, rating) {
+  const s = prevSrs || { interval: 0, ease: 2.5, reps: 0 };
+  let { interval, ease, reps } = s;
+
+  if (rating === "again") {
+    reps = 0;
+    interval = 1;
+    ease = Math.max(1.3, ease - 0.2);
+  } else {
+    const wasNew = reps === 0;
+    reps += 1;
+    if (rating === "hard") {
+      interval = wasNew ? 1 : Math.max(1, Math.round(interval * 1.2));
+      ease = Math.max(1.3, ease - 0.15);
+    } else if (rating === "easy") {
+      interval = wasNew ? 4 : Math.max(1, Math.round(interval * ease * 1.3));
+      ease = ease + 0.15;
+    } else {
+      // good
+      interval = wasNew ? 1 : Math.max(1, Math.round(interval * ease));
+    }
+  }
+
+  return { interval, ease, reps, due: Date.now() + interval * 86400000 };
+}
+
+// 新卡片（没复习过）也算"待复习"——毕竟还没学过
+function isDueForReview(card) {
+  return !card.srs || card.srs.due <= Date.now();
 }
 
 export default function WordLearningApp() {
@@ -1320,6 +1453,13 @@ export default function WordLearningApp() {
   });
   const [targetBookId, setTargetBookId] = useState("");
   const [synonyms, setSynonyms] = useState([]);
+  const [streak, setStreak] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("study-streak")) || { current: 0, longest: 0, lastDate: "" };
+    } catch (error) {
+      return { current: 0, longest: 0, lastDate: "" };
+    }
+  });
 
   useEffect(() => setSelectedSenseIndex(0), [selectedWord?.word]);
 
@@ -1356,15 +1496,25 @@ export default function WordLearningApp() {
     booksSyncTimer.current = setTimeout(() => syncBooksToSupabase(sessionUser.id, books), 1200);
   }, [books, sessionUser]);
 
+  const streakSyncTimer = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem("study-streak", JSON.stringify(streak));
+    if (!sessionUser) return;
+    clearTimeout(streakSyncTimer.current);
+    streakSyncTimer.current = setTimeout(() => syncStreakToSupabase(sessionUser.id, streak), 1200);
+  }, [streak, sessionUser]);
+
   // 登录后：账号里已经有数据就用账号的（换设备也能看到一样的单词本）；
   // 账号是空的但本地已经攒了一些内容，就把本地内容"认领"到账号上，不会凭空丢失
   useEffect(() => {
     if (!sessionUser) return;
     let cancelled = false;
     (async () => {
-      const [cardsRes, booksRes] = await Promise.all([
+      const [cardsRes, booksRes, streakRes] = await Promise.all([
         supabase.from("word_cards").select("*").eq("user_id", sessionUser.id),
         supabase.from("word_books").select("*").eq("user_id", sessionUser.id),
+        supabase.from("study_streaks").select("*").eq("user_id", sessionUser.id).maybeSingle(),
       ]);
       if (cancelled) return;
       const remoteCards = cardsRes.data || [];
@@ -1373,11 +1523,19 @@ export default function WordLearningApp() {
       if (remoteCards.length === 0 && remoteBooks.length === 0) {
         if (cards.length > 0) syncCardsToSupabase(sessionUser.id, cards);
         if (books.length > 0) syncBooksToSupabase(sessionUser.id, books);
-        return;
+      } else {
+        setCards(remoteCards.map(cardFromDbRow));
+        setBooks(remoteBooks.map(bookFromDbRow));
       }
 
-      setCards(remoteCards.map(cardFromDbRow));
-      setBooks(remoteBooks.map(bookFromDbRow));
+      const remoteStreak = streakRes.data
+        ? {
+            current: streakRes.data.current_streak || 0,
+            longest: streakRes.data.longest_streak || 0,
+            lastDate: streakRes.data.last_study_date || "",
+          }
+        : null;
+      setStreak((localStreak) => mergeStreaks(localStreak, remoteStreak));
     })();
     return () => {
       cancelled = true;
@@ -1438,6 +1596,9 @@ export default function WordLearningApp() {
       );
   };
 
+  // 有实际学习行为（查词、复习闪卡）才算"今天学习过"，只是打开页面不算
+  const recordStudyDay = () => setStreak((prev) => computeStreakUpdate(prev, todayStr()));
+
   const handleAuth = async (e) => {
     e.preventDefault();
     if (!email || !password) {
@@ -1482,6 +1643,7 @@ export default function WordLearningApp() {
       return { ok: false, word: result.word || word, suggestions: result.suggestions || [] };
     }
     logEvent("search");
+    recordStudyDay();
     const rawCard = { ...result.card, mode: learningMode };
     let finalCard = rawCard;
     setCards((cur) => {
@@ -1641,7 +1803,10 @@ export default function WordLearningApp() {
     setSelectedWord((cur) => (cur && cur.id === cardId ? { ...cur, notes } : cur));
   };
 
-
+  // 闪卡评分：借鉴 Anki 的间隔重复，根据"记不记得"调整这张卡下次该什么时候再复习
+  const rateCard = (cardId, rating) => {
+    setCards((cur) => cur.map((c) => (c.id === cardId ? { ...c, srs: nextSrsState(c.srs, rating) } : c)));
+  };
 
   const handleSettingChange = (key) => setSettings((cur) => ({ ...cur, [key]: !cur[key] }));
 
@@ -1666,7 +1831,14 @@ export default function WordLearningApp() {
         {/* Header */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-gradient-to-br from-white to-emerald-50/60 rounded-2xl p-6 shadow-sm border border-[#E3ECE9]">
           <div>
-            <p className="text-xs tracking-widest text-emerald-600 font-semibold uppercase">Translate Psychic</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-xs tracking-widest text-emerald-600 font-semibold uppercase">Translate Psychic</p>
+              {streak.current > 0 && (
+                <span className="text-xs font-semibold bg-amber-100 text-amber-700 rounded-full px-2.5 py-0.5">
+                  🔥 {uiLang === "en" ? `${streak.current}-day streak` : `连续学习 ${streak.current} 天`}
+                </span>
+              )}
+            </div>
             <h1 className="text-2xl md:text-3xl font-bold mt-1">
               {uiLang === "en"
                 ? learningMode === "learn-zh"
@@ -2256,7 +2428,11 @@ export default function WordLearningApp() {
             cards={cards}
             onClose={() => setStudyBookId(null)}
             uiLang={uiLang}
-            onReview={() => logEvent("flashcard_reviewed")}
+            onReview={() => {
+              logEvent("flashcard_reviewed");
+              recordStudyDay();
+            }}
+            onRate={rateCard}
           />
         )}
 

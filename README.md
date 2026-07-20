@@ -7,8 +7,9 @@
 ## 功能
 - 查词：免费词典 API 保证权威、完整的英文释义；拼写错误会给"您是否要搜索"的建议。
 - 单词本：可以新建/重命名/删除，支持在本子内直接查词加入、按文字筛选已有单词。
-- 闪卡：任选一个单词本，一张一张翻卡片复习。
+- 闪卡：任选一个单词本，一张一张翻卡片复习。翻开答案后可以按"没记住 / 有点难 / 记得 / 很简单"评分，借鉴 Anki 的间隔重复算法（简化版 SM-2）安排这张卡下次该多久后再复习；单词本列表会显示"待复习"数量。
 - 每个单词可以展开看详细释义、例句（自动高亮目标词），并有自由编辑的笔记框。
+- 连续学习天数：查词或复习闪卡当天都会记一次"学习日"，连续学习会累计天数（断一天以上重新从 1 开始）。
 - 数据默认存在浏览器 localStorage 里；登录账号后会自动同步到云端，换设备登录同一账号也能看到一样的单词本。
 
 ## 本地开发
@@ -61,6 +62,7 @@ vercel dev
      senses jsonb not null default '[]'::jsonb,
      other_forms jsonb not null default '[]'::jsonb,
      notes text default '',
+     srs jsonb,
      created_at timestamptz not null default now()
    );
 
@@ -83,6 +85,25 @@ vercel dev
    alter table public.word_books enable row level security;
 
    create policy "Users manage their own books" on public.word_books
+     for all
+     to authenticated
+     using (auth.uid() = user_id)
+     with check (auth.uid() = user_id);
+
+   -- 如果你在这次更新之前已经跑过一遍上面 word_cards 的建表语句（没有 srs 这一列），
+   -- 单独执行这一行把间隔重复要用的字段补上就行，不影响已有数据：
+   alter table public.word_cards add column if not exists srs jsonb;
+
+   create table if not exists public.study_streaks (
+     user_id uuid primary key references auth.users(id) on delete cascade,
+     current_streak int not null default 0,
+     longest_streak int not null default 0,
+     last_study_date date
+   );
+
+   alter table public.study_streaks enable row level security;
+
+   create policy "Users manage their own streak" on public.study_streaks
      for all
      to authenticated
      using (auth.uid() = user_id)
