@@ -145,15 +145,45 @@ async function fetchFreeDictionary(word) {
   }
 }
 
-// ② Datamuse 拼写建议 API：能访问时用它给"您是否要搜索"，比让 AI 猜更快更准
+// 把拉长强调的英文单词（比如打字打嗨了的 "goooood"）压缩成正常写法："同一个字母连续出现3次以上"
+// 在真实英语单词里几乎不会出现，压缩成2个基本能还原成本来的词，再拿去查 Datamuse 命中率高很多
+function collapseRepeatedLetters(word) {
+  return word.replace(/([a-zA-Z])\1{2,}/g, "$1$1");
+}
+
+// ② Datamuse 拼写建议 API：能访问时用它给"您是否要搜索"，比让 AI 猜更快更准。
+// 同时顺手返回 exactMatch——原样这个词是不是本来就在 Datamuse 的词库里，
+// 用来判断"这就是个真词，词典没收录而已"还是"这大概率是打错字/瞎打的"，
+// 避免明显打错的输入被送去让 AI 硬编一个不存在的释义
 async function fetchSpellingSuggestions(word) {
   try {
-    const res = await fetch(`https://api.datamuse.com/words?sp=${encodeURIComponent(word)}&max=5`);
-    if (!res.ok) return { status: "blocked" };
-    const data = await res.json();
-    return { status: "ok", list: data.map((item) => item.word).filter((w) => w.toLowerCase() !== word.toLowerCase()) };
+    const primaryRes = await fetch(`https://api.datamuse.com/words?sp=${encodeURIComponent(word)}&max=5`);
+    if (!primaryRes.ok) return { status: "blocked", exactMatch: false, list: [] };
+    const primaryData = await primaryRes.json();
+    const exactMatch = primaryData.some((item) => item.word.toLowerCase() === word.toLowerCase());
+
+    let extraData = [];
+    const normalized = collapseRepeatedLetters(word);
+    if (normalized.toLowerCase() !== word.toLowerCase()) {
+      try {
+        const extraRes = await fetch(`https://api.datamuse.com/words?sp=${encodeURIComponent(normalized)}&max=5`);
+        if (extraRes.ok) extraData = await extraRes.json();
+      } catch (error) {
+        // 忽略，正常查询结果不受影响
+      }
+    }
+
+    const seen = new Set([word.toLowerCase()]);
+    const list = [];
+    for (const item of [...extraData, ...primaryData]) {
+      const w = item.word.toLowerCase();
+      if (seen.has(w)) continue;
+      seen.add(w);
+      list.push(item.word);
+    }
+    return { status: "ok", exactMatch, list: list.slice(0, 5) };
   } catch (error) {
-    return { status: "blocked" };
+    return { status: "blocked", exactMatch: false, list: [] };
   }
 }
 
@@ -186,7 +216,10 @@ function extractMeaningsFromDict(dictEntry) {
   return collected.slice(0, 8);
 }
 
-// AI 只负责"翻译"这一件事——比从零生成快得多，而且是基于真实词典内容翻译，不会瞎编
+// AI 只负责"翻译"这一件事——比从零生成快得多，而且是基于真实词典内容翻译，不会瞎编。
+// 拆成两个小请求并发执行：一个给单词整体翻译+词形变化（内容少，回得快），一个给每条释义的
+// 详细内容（例句、学习提示，本来就是耗时大头）。两个一起发出去，总耗时约等于较慢的那一个，
+// 比塞进一个大请求里串行生成明显快
 async function translateMeaningsWithAI(word, meanings) {
   if (meanings.length === 0) return { translation: "", items: [] };
 
@@ -194,13 +227,18 @@ async function translateMeaningsWithAI(word, meanings) {
     .map((m, i) => `${i + 1}. [${m.part_of_speech}] ${m.english_definition}${m.example ? ` | 例句: ${m.example}` : ""}`)
     .join("\n");
 
-  const prompt = `请把下面来自英语词典的释义翻译成自然、简洁的中文，供中国学生学英语使用。单词："${word}"。
+  const formsPrompt = `给出英语单词 "${word}" 最常用的中文翻译（一两个词），以及它的词形变化。
+只输出 JSON，不要多余文字或 markdown：
+{
+  "translation": "整个单词最常用的中文翻译（一两个词）",
+  "other_forms": [ { "label": "这个词形的中文说法，比如 过去式/过去分词/现在分词/第三人称单数/复数/比较级/最高级", "form": "对应的英文词形" } ]（只列出这个词真实适用的词形变化，没有规律变化就返回空数组，不要瞎编）
+}`;
+
+  const itemsPrompt = `请把下面来自英语词典的释义翻译成自然、简洁的中文，供中国学生学英语使用。单词："${word}"。
 ${listText}
 
 只输出 JSON，不要多余文字或 markdown：
 {
-  "translation": "整个单词最常用的中文翻译（一两个词）",
-  "other_forms": [ { "label": "这个词形的中文说法，比如 过去式/过去分词/现在分词/第三人称单数/复数/比较级/最高级", "form": "对应的英文词形" } ]（只列出这个词真实适用的词形变化，没有规律变化就返回空数组，不要瞎编）,
   "items": [
     {
       "chinese_meaning": "简短中文词义",
@@ -213,8 +251,14 @@ ${listText}
 }
 items 数组长度必须与上面编号数量一致，按顺序对应，不要合并或省略。`;
 
-  const text = await callAI(prompt, 1000);
-  return extractJson(text);
+  const [formsText, itemsText] = await Promise.all([callAI(formsPrompt), callAI(itemsPrompt)]);
+  const forms = extractJson(formsText);
+  const parsedItems = extractJson(itemsText);
+  return {
+    translation: forms.translation || "",
+    other_forms: forms.other_forms || [],
+    items: parsedItems.items || [],
+  };
 }
 
 // 免费、不需要 key 的翻译服务（MyMemory），在 Gemini 打不通时当降级方案用。
@@ -295,32 +339,40 @@ function buildCardFromDict(englishWord, dictEntry, meanings, translationResult) 
   };
 }
 
-// 降级方案：词典/拼写建议 API 访问不通时（比如当前沙盒环境），完全交给 AI 一次性生成
-// 要求覆盖"常见"的释义，不人为设上限为1-2条，保证完整度；同时明确要求不要为乱打的字符硬编释义
+// 降级方案：词典/拼写建议 API 访问不通时（比如当前沙盒环境），完全交给 AI 一次性生成。
+// 拆成两个并发请求：一个专门判断"这是不是真词"+基本信息（内容少，回得快），一个专门生成
+// 各条释义的详细内容（内容多，本来就是耗时大头）——两个一起发出去，总耗时不会叠加。
+// 是否真词的判断交给第一个请求；第二个请求也顺手要求非真词时返回空数组兜底，双重保险
 async function generateCardWithAIOnly(word, direction) {
-  const prompt = `你是英语词典编纂专家。用户输入了："${word}"（查询方向：${direction === "en->zh" ? "英文查中文" : "中文查英文"}）。
+  const metaPrompt = `你是英语词典编纂专家。用户输入了："${word}"（查询方向：${direction === "en->zh" ? "英文查中文" : "中文查英文"}）。
 
 第一步先判断：这是不是一个真实存在、可识别的英文单词或常见短语？
 - 如果是随机敲的字符、明显的乱码、或者根本不是任何语言里的真实词汇/短语，不要编造释义。此时只输出：{"not_found": true}
 - 如果只是可能拼错了但看起来接近某个真实单词，同样输出 {"not_found": true}，不要猜测着硬给一个不相关的释义。
 
-只有当它确实是一个真实、可识别的词/短语时，才给出常见的全部释义，覆盖日常和常见语境下会用到的词性和意思（通常2-5条，不要遗漏常见用法，但不要堆砌生僻义项）。
-
-只输出 JSON，不要多余文字或 markdown：
+只有当它确实是一个真实、可识别的词/短语时，才输出：
 {
   "word": "${direction === "zh->en" ? "对应的英文单词" : "原单词"}",
   "translation": "最常用的中文翻译（一两个词）",
   "pronunciation": "音标",
-  "other_forms": [ { "label": "这个词形的中文说法，比如 过去式/过去分词/现在分词/第三人称单数/复数/比较级/最高级", "form": "对应的英文词形" } ]（只列出真实适用的词形变化，没有就返回空数组，不要瞎编）,
+  "other_forms": [ { "label": "这个词形的中文说法，比如 过去式/过去分词/现在分词/第三人称单数/复数/比较级/最高级", "form": "对应的英文词形" } ]（只列出真实适用的词形变化，没有就返回空数组，不要瞎编）
+}
+只输出 JSON，不要多余文字或 markdown。`;
+
+  const sensesPrompt = `你是英语词典编纂专家。如果 "${word}" 是一个真实存在、可识别的英文单词或常见短语，给出它常见的全部释义，覆盖日常和常见语境下会用到的词性和意思（通常2-5条，不要遗漏常见用法，但不要堆砌生僻义项）。如果它是随机字符/乱码/不是真实词汇，输出空数组。
+
+只输出 JSON，不要多余文字或 markdown：
+{
   "senses": [
     { "part_of_speech": "词性", "english_definition": "简短英文释义", "chinese_meaning": "简短中文词义", "definition_translation": "释义的中文翻译", "example": "简单常见、贴近日常生活的英文例句，避免生僻或过于书面的说法", "example_translation": "例句中文翻译", "learning_tip": "生动有趣的学习小贴士，25字以内，优先用相关的英语谚语/习语（配中文翻译），没有的话再用词根或联想记忆" }
   ]
 }`;
 
-  const text = await callAI(prompt, 1200);
-  const parsed = extractJson(text);
+  const [metaText, sensesText] = await Promise.all([callAI(metaPrompt), callAI(sensesPrompt)]);
+  const parsed = extractJson(metaText);
+  const sensesParsed = extractJson(sensesText);
 
-  if (parsed.not_found || !parsed.senses || parsed.senses.length === 0) {
+  if (parsed.not_found || !sensesParsed.senses || sensesParsed.senses.length === 0) {
     return null;
   }
 
@@ -330,7 +382,7 @@ async function generateCardWithAIOnly(word, direction) {
     translation: parsed.translation || "",
     pronunciation: parsed.pronunciation || "",
     otherForms: parsed.other_forms || [],
-    senses: parsed.senses || [],
+    senses: sensesParsed.senses || [],
     notes: "",
     createdAt: Date.now(),
   };
@@ -488,7 +540,16 @@ async function lookupWord(rawWord) {
 
     // dictResult.status 是 "notfound"（这份免费词典恰好没收录，不代表它不是真词——
     // 比如 "chinese" 这种常见词，dictionaryapi.dev 里就查不到）或 "blocked"（词典 API 访问不通）：
-    // 两种情况都先试着让 AI 直接生成一份完整卡片兜底，而不是立刻判定"找不到"
+    // 先用免费、不依赖 AI 的 Datamuse 判断一下这到底是"词典没收录的真词"还是"很可能是打错字/瞎打的"
+    // （比如 "goooood"）——明显是拼错的话直接给拼写建议，不要送去让 AI 硬编一个不存在的释义，
+    // 这样既避免了 AI 偶尔不遵守指令瞎编内容，也省了一趟没必要的 AI 调用，更快
+    const spelling = await fetchSpellingSuggestions(englishWord);
+    if (spelling.status === "ok" && !spelling.exactMatch) {
+      return { type: "notfound", word: englishWord, suggestions: spelling.list };
+    }
+
+    // 词典没收录，但 Datamuse 确认这是个真词（或者 Datamuse 也访问不通，没法判断）：
+    // 让 AI 直接生成一份完整卡片兜底，而不是直接判定"找不到"
     let aiCard = null;
     try {
       aiCard = await generateCardWithAIOnly(englishWord, effectiveDirection);
@@ -500,8 +561,7 @@ async function lookupWord(rawWord) {
       return { type: "card", card: aiCard };
     }
 
-    // 词典没有、AI 也生成不出来：提示拼写建议。Datamuse 是免费的公开 API，跟 Gemini 是否可用无关
-    const spelling = await fetchSpellingSuggestions(englishWord);
+    // AI 也生成不出来：Datamuse 正常的话就用它的结果，打不通才轮到 AI 给拼写建议
     const suggestions = spelling.status === "ok" ? spelling.list : await getAISpellingSuggestions(englishWord);
     return { type: "notfound", word: englishWord, suggestions };
   } catch (error) {
