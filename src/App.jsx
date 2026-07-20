@@ -66,11 +66,13 @@ function extractJson(text) {
 
 // 所有 AI 调用统一走后端的 /api/ai 代理（见项目根目录 api/ai.js，目前接的是智谱 GLM-4-Flash）。
 // 真正的 API Key 只存在服务器端环境变量里，浏览器拿不到，避免被偷走。
-// 加了个超时：AI 服务打不通或者很慢的时候，最多等 7 秒就放弃转去用免费翻译兜底，
-// 不然查词会被卡住很久才降级，体感会很慢
+// 加了个超时：AI 服务打不通或者很慢的时候，最多等 20 秒就放弃转去用免费翻译兜底，
+// 不然查词会被卡住很久才降级，体感会很慢。
+// （词形变化功能上线后 AI 单次要生成的内容变多了，实测正常响应经常要 15~18 秒，
+// 超时定得太短会导致几乎每次都提前放弃、掉去免费翻译兜底，例句和学习提示全部丢失）
 async function callAI(prompt) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 7000);
+  const timeout = setTimeout(() => controller.abort(), 20000);
   try {
     const response = await fetch("/api/ai", {
       method: "POST",
